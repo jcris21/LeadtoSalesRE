@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     outbox_poll_interval_seconds: float = 1.0
     outbox_batch_size: int = 50
 
+    # Conversation dormancy decay (per-stage/org-configurable thresholds arrive
+    # with the Engagement module; this is the platform default).
+    dormancy_threshold_hours: int = 72
+    dormancy_scan_interval_seconds: float = 600.0
+
     otel_service_name: str = "lead-to-sales-system"
     otel_exporter_otlp_endpoint: str | None = None
 

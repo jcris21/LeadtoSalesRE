@@ -48,7 +48,11 @@ def _serialize(event: DomainEvent) -> dict:
     data.pop("event_id", None)
     data.pop("occurred_at", None)
     data.pop("organization_id", None)
-    return {"event_type": event.event_type, "fields": data}
+    return {
+        "event_type": event.event_type,
+        "organization_id": str(event.organization_id) if event.organization_id else None,
+        "fields": data,
+    }
 
 
 class EventBusWorker:
