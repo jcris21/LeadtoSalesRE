@@ -65,6 +65,9 @@ services:
       - POSTGRES_USERNAME=chatwoot
       - POSTGRES_PASSWORD=chatwoot
       - POSTGRES_DATABASE=chatwoot
+      # Local dev only: allow webhook delivery to the `app` service on the
+      # internal compose network (Chatwoot blocks private IPs by default, SSRF).
+      - SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true
     command: >
       sh -c "bundle exec rails db:chatwoot_prepare && bundle exec rails s -p 3000 -b 0.0.0.0"
 
@@ -84,6 +87,8 @@ services:
       - POSTGRES_USERNAME=chatwoot
       - POSTGRES_PASSWORD=chatwoot
       - POSTGRES_DATABASE=chatwoot
+      # Sidekiq runs WebhookJob — needs the same SSRF allowance as rails.
+      - SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true
     command: bundle exec sidekiq -C config/sidekiq.yml
 
 volumes:
