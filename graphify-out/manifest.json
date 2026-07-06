@@ -1,0 +1,17 @@
+{
+  "Agentic_System.md": {
+    "mtime": 1783147112.2258275,
+    "ast_hash": "eb3ce09c3a769e4e431a1d9cb600cf66",
+    "semantic_hash": "eb3ce09c3a769e4e431a1d9cb600cf66"
+  },
+  "ArchitecturalDrivers.md": {
+    "mtime": 1783181570.5323954,
+    "ast_hash": "6a3339172a1e9981b22eda85df7434f7",
+    "semantic_hash": "6a3339172a1e9981b22eda85df7434f7"
+  },
+  "Architecture.md": {
+    "mtime": 1783280107.7643352,
+    "ast_hash": "362f177df71efbf835f6187f18ae2067",
+    "semantic_hash": "362f177df71efbf835f6187f18ae2067"
+  }
+}

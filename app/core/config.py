@@ -1,0 +1,44 @@
+"""Application-wide settings, loaded from environment (.env). Per-organization
+integration config (Chatwoot inbox, WhatsApp, Google Workspace, CRM credentials)
+is NOT here — it lives in the OrganizationConfig aggregate in Postgres, per
+ArchitecturalDrivers Sprint 0 ("per-organization configuration model")."""
+
+from functools import lru_cache
+
+from pydantic import PostgresDsn
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    app_env: str = "local"
+    log_level: str = "INFO"
+
+    # Supabase (System of Record for the AI domain: profiles, embeddings, KG,
+    # Prompt Registry, tool config, decision traces).
+    database_url: PostgresDsn
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+
+    # Admin API auth
+    jwt_secret: str
+    jwt_algorithm: str = "HS256"
+    jwt_expires_minutes: int = 60 * 8
+
+    # Chatwoot (SoR for conversations). Per-org inbox/API-key overrides live in
+    # OrganizationConfig; these are only the platform-level defaults for local dev.
+    chatwoot_base_url: str = "http://localhost:3000"
+    chatwoot_platform_api_key: str | None = None
+
+    # Event bus / outbox worker
+    outbox_poll_interval_seconds: float = 1.0
+    outbox_batch_size: int = 50
+
+    otel_service_name: str = "lead-to-sales-system"
+    otel_exporter_otlp_endpoint: str | None = None
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

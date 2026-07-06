@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+uv.lock.bak
+
+# graphify working files (keep the report/graph, ignore transient locks)
+graphify-out/.graphify_*
+
+# Chatwoot / docker volumes if ever mounted locally
+docker/volumes/
