@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import math
 import uuid
-from typing import Callable, Protocol
+from collections.abc import Callable
+from typing import Protocol
 
 from app.modules.lead_qualification.domain.models import BuyerProfile
 from app.modules.recommendation.domain.models import Property, PropertyEmbedding
@@ -58,7 +59,7 @@ def _cosine_similarity(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     """
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0.0 or norm_b == 0.0:
@@ -80,7 +81,9 @@ def _default_embed_query(buyer_profile: BuyerProfile) -> tuple[float, ...]:
     if buyer_profile.budget is not None:
         budget_signal = (buyer_profile.budget.minimum + buyer_profile.budget.maximum) / 2.0
     zone_signal = float(len(buyer_profile.locations))
-    type_signal = float(hash(buyer_profile.property_type) % 100) if buyer_profile.property_type else 0.0
+    type_signal = (
+        float(hash(buyer_profile.property_type) % 100) if buyer_profile.property_type else 0.0
+    )
     return (budget_signal, zone_signal, type_signal)
 
 

@@ -18,6 +18,7 @@ from app.modules.recommendation.domain.models import (
     Property,
     RankedCandidate,
     RankingSignal,
+    RecommendationResult,
 )
 
 
@@ -77,5 +78,6 @@ class RecommendationPort(Protocol):
     Builder) calls — orchestrates filter -> retrieval -> rank -> explain ->
     enrich end to end and returns the Top-3 (§6.1.1, §7.10)."""
 
-    async def search(self, *, organization_id: uuid.UUID, lead_id: uuid.UUID):  # -> RecommendationResult
-        ...
+    async def search(
+        self, *, organization_id: uuid.UUID, lead_id: uuid.UUID
+    ) -> RecommendationResult: ...

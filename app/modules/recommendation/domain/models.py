@@ -16,18 +16,25 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.modules.lead_qualification.domain.models import PropertyType
+from app.modules.lead_qualification.domain.models import MoneyRange, PropertyType
 from app.shared.domain.base import DomainEvent, Entity, ValueObject, new_id, utcnow
+
+__all__ = [
+    "MoneyRange",
+    "NeighborhoodEnriched",
+    "NeighborhoodInsight",
+    "Property",
+    "PropertyEmbedding",
+    "RankedCandidate",
+    "RankingSignal",
+    "RecommendationError",
+    "RecommendationItem",
+    "RecommendationResult",
+]
 
 
 class RecommendationError(ValueError):
     """Raised when a recommendation-pipeline invariant is violated."""
-
-
-@dataclass(frozen=True)
-class MoneyRange(ValueObject):
-    minimum: float
-    maximum: float
 
 
 class Property(Entity):
@@ -58,7 +65,11 @@ class Property(Entity):
         self.updated_at = updated_at or utcnow()
 
     def matches_hard_filters(
-        self, *, budget: MoneyRange | None, zones: tuple[str, ...], property_type: PropertyType | None
+        self,
+        *,
+        budget: MoneyRange | None,
+        zones: tuple[str, ...],
+        property_type: PropertyType | None,
     ) -> bool:
         """Structured Filter Service predicate (§6.3): hard constraints only,
         never a ranking signal — a property either qualifies or is discarded."""

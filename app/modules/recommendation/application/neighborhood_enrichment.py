@@ -85,7 +85,9 @@ class NeighborhoodEnrichmentAdapter:
                 )
                 self._schedule_retry(lead_id=lead_id, property_id=property_id)
                 return property_id, None
-            return property_id, NeighborhoodInsight(property_id=property_id, nearby_places=nearby_places, partial=False)
+            return property_id, NeighborhoodInsight(
+                property_id=property_id, nearby_places=nearby_places, partial=False
+            )
 
         pairs = await asyncio.gather(*(fetch_one(property_id) for property_id in property_ids))
         return dict(pairs)
@@ -98,7 +100,9 @@ class NeighborhoodEnrichmentAdapter:
         reference is stashed in `self._background_tasks` so it survives past
         the end of `enrich_top3`, and removed once it finishes either way.
         """
-        task = asyncio.create_task(self._retry_and_publish(lead_id=lead_id, property_id=property_id))
+        task = asyncio.create_task(
+            self._retry_and_publish(lead_id=lead_id, property_id=property_id)
+        )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
