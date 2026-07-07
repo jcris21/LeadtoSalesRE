@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     dormancy_threshold_hours: int = 72
     dormancy_scan_interval_seconds: float = 600.0
 
+    # Recommendation pipeline (M4, §7.10). semantic_top_n is the Hybrid
+    # Retrieval fan-in size before ranking; top_k is the Top-3 the Coordinator
+    # receives; enrichment_timeout_ms is the Neighborhood Enrichment budget
+    # inside the overall <15s QA-01 response target.
+    recommendation_semantic_top_n: int = 10
+    recommendation_top_k: int = 3
+    recommendation_enrichment_timeout_ms: int = 3000
+
     otel_service_name: str = "lead-to-sales-system"
     otel_exporter_otlp_endpoint: str | None = None
 
