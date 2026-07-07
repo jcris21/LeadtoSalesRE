@@ -6,11 +6,13 @@ Turn order is fixed by contract (GuardrailPort, §8): the Guardrail Interceptor
 runs BEFORE any reasoning; on bypass the Coordinator never generates a
 conversational reply that turn — ownership transfers immediately (§7.5).
 
-The LLM sits behind `ResponderPort`. Sprint 1 ships `TemplateResponder`, a
-deterministic placeholder that keeps the pipeline (webhook -> bus -> coordinator
--> ResponseReady -> Chatwoot) fully operational and testable without LLM
-credentials; the LangGraph implementation recommended by Agentic_System §5
-plugs in behind the same port without touching this module.
+The LLM sits behind `ResponderPort`. The default implementation is
+`LangGraphResponder` (langgraph_responder.py): a LangGraph StateGraph with
+per-conversation checkpoints (`thread_id = conversation_id`), per Agentic_System
+§5. Its brain is deterministic until LLM credentials land, so the pipeline
+(webhook -> bus -> coordinator -> ResponseReady -> Chatwoot) stays fully
+operational and testable offline. `TemplateResponder` remains as a minimal
+stub for isolated unit tests.
 """
 
 from __future__ import annotations
@@ -56,9 +58,8 @@ class ResponderPort(Protocol):
 
 
 class TemplateResponder:
-    """Deterministic Sprint 1 placeholder: acknowledges and advances the
-    conversation without an LLM. Replaced behind ResponderPort when LLM
-    credentials/LangGraph land (Agentic_System §5)."""
+    """Minimal deterministic stub kept for isolated unit tests. Production
+    default is LangGraphResponder (see module docstring)."""
 
     async def respond(self, *, system_prompt: str, conversation_id: uuid.UUID, text: str) -> str:
         return (
@@ -82,8 +83,12 @@ class CoordinatorAgent:
         policy_engine: OwnershipPolicyEngine | None = None,
         sidebar: SidebarPublisher | None = None,
     ):
+        from app.modules.conversation_ownership.application.langgraph_responder import (
+            get_default_responder,
+        )
+
         self._session = session
-        self._responder = responder or TemplateResponder()
+        self._responder = responder or get_default_responder()
         self._guardrail = guardrail or GuardrailInterceptor()
         self._policy_engine = policy_engine or OwnershipPolicyEngine()
         self._sidebar = sidebar

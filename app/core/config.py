@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     chatwoot_base_url: str = "http://localhost:3000"
     chatwoot_platform_api_key: str | None = None
 
+    # wacrm (SoR for leads/pipeline, CON-2). Local dev points at mocks/wacrm_mock;
+    # per-org credentials move into OrganizationConfig when real wacrm lands.
+    # (docker-compose exposes the mock on 8080; inside the compose network use
+    # WACRM_BASE_URL=http://wacrm-mock:8080)
+    wacrm_base_url: str = "http://localhost:8080"
+    crm_sync_poll_interval_seconds: float = 30.0
+    crm_staleness_threshold_seconds: int = 60  # QA-13 staleness bound
+    profile_completeness_threshold: float = 90.0  # QA-14 gate, percent
+
     # Event bus / outbox worker
     outbox_poll_interval_seconds: float = 1.0
     outbox_batch_size: int = 50

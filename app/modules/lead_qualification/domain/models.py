@@ -1,0 +1,247 @@
+"""Domain model of the Lead & Qualification bounded context (M3, Sprint 2).
+
+`Lead` mirrors the wacrm lead (wacrm is SoR for leads/pipeline, CON-2): the
+aggregate never talks to wacrm itself — the Lead Sync Adapter is the single
+read/write point (QA-08). `Lead.is_stale()` materializes QA-13: any business
+decision on a lead older than the staleness bound must force a re-sync first.
+
+`BuyerProfile` is the structured output of conversational qualification (E3):
+`completeness()` implements the QA-14 gate input — five dimensions captured
+progressively, one at a time (§6.2 progressive profiling).
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import StrEnum
+
+from app.shared.domain.base import AggregateRoot, DomainEvent, Entity, ValueObject, new_id, utcnow
+
+
+class PipelineStage(StrEnum):
+    """wacrm pipeline stages (Architecture.md domain model). Values match the
+    wacrm API verbatim — the Sync Adapter translates nothing here by design,
+    so a stage wacrm doesn't know can never be pushed back to it."""
+
+    NEW = "New"
+    QUALIFIED = "Qualified"
+    APPOINTMENT_SET = "AppointmentSet"
+    VISITED = "Visited"
+    NEGOTIATION = "Negotiation"
+    WON = "Won"
+    LOST = "Lost"
+
+
+class Timeline(StrEnum):
+    """When the buyer intends to purchase — one of the five profile dimensions."""
+
+    IMMEDIATE = "immediate"
+    THREE_MONTHS = "3_months"
+    SIX_MONTHS = "6_months"
+    OVER_SIX_MONTHS = "over_6_months"
+    EXPLORING = "exploring"
+
+
+class PropertyType(StrEnum):
+    APARTMENT = "apartment"
+    HOUSE = "house"
+    LAND = "land"
+    COMMERCIAL = "commercial"
+    OTHER = "other"
+
+
+#: The five dimensions progressive profiling must fill (Architecture.md §6.2).
+PROFILE_DIMENSIONS: tuple[str, ...] = (
+    "budget",
+    "locations",
+    "property_type",
+    "timeline",
+    "must_haves",
+)
+
+
+class ProfileValidationError(ValueError):
+    """A ProfilePatch failed range/shape validation (e.g. budget <= 0). Raised
+    before anything is persisted — invalid data never reaches the profile."""
+
+
+@dataclass(frozen=True)
+class MoneyRange(ValueObject):
+    """Budget as a closed range. Currency handling is per-organization config;
+    Sprint 2 stores the amounts as given by the conversation."""
+
+    minimum: float
+    maximum: float
+
+    def __post_init__(self) -> None:
+        if self.minimum <= 0 or self.maximum <= 0:
+            raise ProfileValidationError("Budget amounts must be positive")
+        if self.minimum > self.maximum:
+            raise ProfileValidationError("Budget minimum cannot exceed maximum")
+
+
+@dataclass(frozen=True)
+class ProfilePatch(ValueObject):
+    """One progressive-profiling increment: only the dimensions the lead just
+    answered. `None` means 'not part of this patch', never 'clear the value'."""
+
+    budget: MoneyRange | None = None
+    locations: tuple[str, ...] | None = None
+    property_type: PropertyType | None = None
+    timeline: Timeline | None = None
+    must_haves: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.locations is not None and not self.locations:
+            raise ProfileValidationError("locations patch cannot be an empty list")
+        if self.must_haves is not None and not self.must_haves:
+            raise ProfileValidationError("must_haves patch cannot be an empty list")
+
+    def is_empty(self) -> bool:
+        return all(
+            getattr(self, dimension) is None for dimension in PROFILE_DIMENSIONS
+        )
+
+
+class BuyerProfile(Entity):
+    """Structured output of conversational qualification (E3). Grows one
+    dimension at a time; `completeness()` is the QA-14 gate input."""
+
+    def __init__(
+        self,
+        *,
+        id: uuid.UUID | None = None,
+        lead_id: uuid.UUID,
+        budget: MoneyRange | None = None,
+        locations: tuple[str, ...] = (),
+        property_type: PropertyType | None = None,
+        timeline: Timeline | None = None,
+        must_haves: tuple[str, ...] = (),
+        updated_at: datetime | None = None,
+    ) -> None:
+        self.id = id or new_id()
+        self.lead_id = lead_id
+        self.budget = budget
+        self.locations = locations
+        self.property_type = property_type
+        self.timeline = timeline
+        self.must_haves = must_haves
+        self.updated_at = updated_at or utcnow()
+
+    def apply(self, patch: ProfilePatch) -> None:
+        if patch.budget is not None:
+            self.budget = patch.budget
+        if patch.locations is not None:
+            self.locations = tuple(patch.locations)
+        if patch.property_type is not None:
+            self.property_type = patch.property_type
+        if patch.timeline is not None:
+            self.timeline = patch.timeline
+        if patch.must_haves is not None:
+            self.must_haves = tuple(patch.must_haves)
+        self.updated_at = utcnow()
+
+    def captured_dimensions(self) -> tuple[str, ...]:
+        captured = []
+        if self.budget is not None:
+            captured.append("budget")
+        if self.locations:
+            captured.append("locations")
+        if self.property_type is not None:
+            captured.append("property_type")
+        if self.timeline is not None:
+            captured.append("timeline")
+        if self.must_haves:
+            captured.append("must_haves")
+        return tuple(captured)
+
+    def missing_dimensions(self) -> tuple[str, ...]:
+        captured = set(self.captured_dimensions())
+        return tuple(d for d in PROFILE_DIMENSIONS if d not in captured)
+
+    def completeness(self) -> float:
+        """Percent of required dimensions captured, 0.0–100.0."""
+        return 100.0 * len(self.captured_dimensions()) / len(PROFILE_DIMENSIONS)
+
+
+@dataclass(frozen=True)
+class CRMStageSynced(DomainEvent):
+    """A lead's pipeline stage was synced from wacrm (§7.7). Consumed by the
+    Ownership Policy Engine and Staleness Guard in later iterations."""
+
+    lead_id: str = ""
+    crm_lead_id: str = ""
+    pipeline_stage: str = ""
+    synced_at: str = ""
+
+
+@dataclass(frozen=True)
+class ProfileCompleted(DomainEvent):
+    """BuyerProfile crossed the completeness threshold (§7.8). The Lead Sync
+    Adapter consumes it to push the qualified stage to wacrm via outbox."""
+
+    lead_id: str = ""
+    crm_lead_id: str = ""
+    completeness: float = 0.0
+    profile: dict = field(default_factory=dict)
+
+
+class Lead(AggregateRoot):
+    """Local mirror of the wacrm lead. Only the Lead Sync Adapter writes it;
+    every other module reads through `LeadSyncPort.get_lead` (QA-08)."""
+
+    def __init__(
+        self,
+        *,
+        id: uuid.UUID | None = None,
+        organization_id: uuid.UUID,
+        crm_lead_id: str,
+        pipeline_stage: PipelineStage = PipelineStage.NEW,
+        lead_score: float = 0.0,
+        assigned_broker_id: uuid.UUID | None = None,
+        synced_at: datetime | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        super().__init__()
+        self.id = id or new_id()
+        self.organization_id = organization_id
+        self.crm_lead_id = crm_lead_id
+        self.pipeline_stage = pipeline_stage
+        self.lead_score = lead_score
+        self.assigned_broker_id = assigned_broker_id
+        self.synced_at = synced_at or utcnow()
+        self.created_at = created_at or utcnow()
+
+    def is_stale(self, *, threshold_seconds: int, now: datetime | None = None) -> bool:
+        """QA-13: True when the mirror exceeded the staleness bound and must be
+        re-synced before any critical business decision."""
+        reference = now or utcnow()
+        return (reference - self.synced_at) > timedelta(seconds=threshold_seconds)
+
+    def mark_synced(
+        self,
+        *,
+        pipeline_stage: PipelineStage,
+        lead_score: float,
+        assigned_broker_id: uuid.UUID | None,
+        synced_at: datetime | None = None,
+    ) -> None:
+        """Apply the wacrm snapshot. Idempotent: re-applying the same snapshot
+        only refreshes `synced_at` (which is the point — QA-13 freshness)."""
+        stage_changed = pipeline_stage is not self.pipeline_stage
+        self.pipeline_stage = pipeline_stage
+        self.lead_score = lead_score
+        self.assigned_broker_id = assigned_broker_id
+        self.synced_at = synced_at or utcnow()
+        if stage_changed:
+            self.record_event(
+                CRMStageSynced(
+                    organization_id=self.organization_id,
+                    lead_id=str(self.id),
+                    crm_lead_id=self.crm_lead_id,
+                    pipeline_stage=self.pipeline_stage.value,
+                    synced_at=self.synced_at.isoformat(),
+                )
+            )

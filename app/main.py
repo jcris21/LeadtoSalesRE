@@ -14,11 +14,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.core.config import get_settings
+from app.core.organization_context import OrganizationContextMiddleware
 from app.modules.auth.router import router as auth_router
 from app.modules.conversation_ownership.api.webhook_router import router as webhooks_router
 from app.modules.conversation_ownership.application.decay import decay_inactive_conversations
 from app.modules.conversation_ownership.wiring import register_event_handlers
 from app.modules.intelligence_ai_admin.api.router import router as prompts_router
+from app.modules.lead_qualification.wiring import (
+    crm_sync_loop,
+)
+from app.modules.lead_qualification.wiring import (
+    register_event_handlers as register_lead_qualification_handlers,
+)
 from app.modules.organization.api.router import router as organizations_router
 from app.shared.infrastructure.event_bus import event_bus
 from app.shared.infrastructure.observability import setup_observability
@@ -26,6 +33,7 @@ from app.shared.infrastructure.observability import setup_observability
 logging.basicConfig(level=get_settings().log_level)
 
 register_event_handlers(event_bus)
+register_lead_qualification_handlers(event_bus)
 
 
 async def _dormancy_decay_loop() -> None:
@@ -45,13 +53,14 @@ async def _dormancy_decay_loop() -> None:
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(event_bus.run_forever())
     decay_task = asyncio.create_task(_dormancy_decay_loop())
+    crm_sync_task = asyncio.create_task(crm_sync_loop())
     try:
         yield
     finally:
         event_bus.stop()
-        for task in (worker_task, decay_task):
+        for task in (worker_task, decay_task, crm_sync_task):
             task.cancel()
-        for task in (worker_task, decay_task):
+        for task in (worker_task, decay_task, crm_sync_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -59,6 +68,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Lead to Sales System", version="0.1.0", lifespan=lifespan)
+app.add_middleware(OrganizationContextMiddleware)
 setup_observability(app)
 
 app.include_router(auth_router, prefix="/api/v1")
