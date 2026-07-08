@@ -54,6 +54,21 @@ class LeadRepository:
         row = result.scalar_one_or_none()
         return self._to_domain(row) if row is not None else None
 
+    async def get_by_contact_reference(
+        self, organization_id: uuid.UUID, contact_reference: str
+    ) -> Lead | None:
+        """Local-mirror lookup for Conversation<->Lead identity matching
+        (Sprint 3): tried before falling back to a live wacrm call, since the
+        CDC poll usually already mirrored the lead locally."""
+        result = await self._session.execute(
+            select(LeadORM).where(
+                LeadORM.organization_id == organization_id,
+                LeadORM.contact_reference == contact_reference,
+            )
+        )
+        row = result.scalar_one_or_none()
+        return self._to_domain(row) if row is not None else None
+
     async def save(self, lead: Lead) -> None:
         row = await self._session.get(LeadORM, lead.id)
         if row is None:
@@ -62,6 +77,7 @@ class LeadRepository:
         row.pipeline_stage = lead.pipeline_stage.value
         row.lead_score = lead.lead_score
         row.assigned_broker_id = lead.assigned_broker_id
+        row.contact_reference = lead.contact_reference
         row.synced_at = lead.synced_at
 
     @staticmethod
@@ -73,6 +89,7 @@ class LeadRepository:
             pipeline_stage=lead.pipeline_stage.value,
             lead_score=lead.lead_score,
             assigned_broker_id=lead.assigned_broker_id,
+            contact_reference=lead.contact_reference,
             synced_at=lead.synced_at,
             created_at=lead.created_at,
         )
@@ -88,6 +105,7 @@ class LeadRepository:
             pipeline_stage=PipelineStage(row.pipeline_stage),
             lead_score=row.lead_score,
             assigned_broker_id=row.assigned_broker_id,
+            contact_reference=row.contact_reference,
             synced_at=_ensure_utc(row.synced_at),
             created_at=_ensure_utc(row.created_at),
         )

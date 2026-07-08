@@ -37,6 +37,10 @@ class LeadORM(Base):
     assigned_broker_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), nullable=True
     )
+    #: External contact identifier (e.g. WhatsApp phone number) shared with
+    #: Chatwoot — the sole key a Conversation can use to resolve its Lead
+    #: without either system inventing an id the other doesn't know (Sprint 3).
+    contact_reference: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )

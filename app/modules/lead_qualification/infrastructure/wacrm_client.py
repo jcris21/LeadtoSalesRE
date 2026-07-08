@@ -24,6 +24,10 @@ class WacrmLeadSnapshot:
     assigned_broker_id: uuid.UUID | None
     lead_score: float
     updated_at: datetime
+    #: External contact identifier (e.g. phone number) shared with Chatwoot;
+    #: the sole shared key that lets a Conversation resolve to this Lead
+    #: without either system inventing an identifier for the other.
+    contact_reference: str | None = None
 
 
 def _parse_snapshot(data: dict) -> WacrmLeadSnapshot:
@@ -44,6 +48,7 @@ def _parse_snapshot(data: dict) -> WacrmLeadSnapshot:
         assigned_broker_id=broker_id,
         lead_score=float(data.get("lead_score") or 0.0),
         updated_at=updated_at,
+        contact_reference=data.get("contact_reference"),
     )
 
 
@@ -74,6 +79,23 @@ class WacrmClient:
             )
             response.raise_for_status()
             return [_parse_snapshot(item) for item in response.json()]
+
+    async def find_by_contact_reference(
+        self, organization_id: uuid.UUID, contact_reference: str
+    ) -> WacrmLeadSnapshot | None:
+        """Resolves the Lead a Chatwoot Conversation belongs to (Sprint 3
+        identity matching) by the one identifier both systems share."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout) as client:
+            response = await client.get(
+                "/leads",
+                params={
+                    "organization_id": str(organization_id),
+                    "contact_reference": contact_reference,
+                },
+            )
+            response.raise_for_status()
+            results = response.json()
+            return _parse_snapshot(results[0]) if results else None
 
     async def update_stage(
         self, crm_lead_id: str, pipeline_stage: str, assigned_broker_id: uuid.UUID | None = None

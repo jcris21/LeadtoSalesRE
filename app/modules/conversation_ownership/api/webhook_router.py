@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
+from app.modules.conversation_ownership.application.lead_linker import LeadLinker
 from app.modules.conversation_ownership.domain.models import Channel, Conversation, MessageReceived
 from app.modules.conversation_ownership.infrastructure.repository import (
     ConversationRepository,
@@ -67,11 +68,17 @@ async def receive_chatwoot_webhook(
             organization_id=organization_id,
             chatwoot_conversation_id=chatwoot_conversation_id,
             channel=_channel_from_payload(payload),
+            contact_reference=_extract_contact_reference(payload),
         )
-        await conversations.add(conversation)
     else:
         conversation.touch(created_at)
-        await conversations.save(conversation)
+
+    if conversation.lead_id is None:
+        # Best-effort re-check on every turn: wacrm's CDC sync is eventually
+        # consistent, so a lead absent at conversation-creation time may have
+        # landed locally since (§7.7) — cheap to retry, no-op if still absent.
+        await LeadLinker(session).link_if_possible(conversation)
+    await conversations.save(conversation)
 
     archive = MessageArchiveRepository(session)
     newly_archived = await archive.archive(
@@ -123,6 +130,17 @@ def _parse_timestamp(raw: object) -> datetime:
         except ValueError:
             logger.warning("Unparseable Chatwoot timestamp %r; using now()", raw)
     return datetime.now(UTC)
+
+
+def _extract_contact_reference(payload: dict) -> str | None:
+    """The identifier shared with wacrm's Lead.contact_reference (Sprint 3
+    identity matching) — a WhatsApp sender's phone number, or a generic
+    contact identifier for non-WhatsApp channels."""
+    phone = _dig(payload, "sender", "phone_number")
+    if phone:
+        return str(phone)
+    identifier = _dig(payload, "sender", "identifier")
+    return str(identifier) if identifier else None
 
 
 def _channel_from_payload(payload: dict) -> Channel:

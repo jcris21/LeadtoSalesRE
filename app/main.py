@@ -27,6 +27,9 @@ from app.modules.lead_qualification.wiring import (
     register_event_handlers as register_lead_qualification_handlers,
 )
 from app.modules.organization.api.router import router as organizations_router
+from app.modules.recommendation.wiring import (
+    register_event_handlers as register_recommendation_handlers,
+)
 from app.shared.infrastructure.event_bus import event_bus
 from app.shared.infrastructure.observability import setup_observability
 
@@ -34,6 +37,7 @@ logging.basicConfig(level=get_settings().log_level)
 
 register_event_handlers(event_bus)
 register_lead_qualification_handlers(event_bus)
+register_recommendation_handlers(event_bus)
 
 
 async def _dormancy_decay_loop() -> None:

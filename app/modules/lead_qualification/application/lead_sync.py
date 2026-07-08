@@ -157,6 +157,7 @@ class LeadSyncAdapter:
                 pipeline_stage=PipelineStage(snapshot.pipeline_stage),
                 lead_score=snapshot.lead_score,
                 assigned_broker_id=snapshot.assigned_broker_id,
+                contact_reference=snapshot.contact_reference,
             )
             await self._leads.add(lead)
         else:
@@ -164,6 +165,7 @@ class LeadSyncAdapter:
                 pipeline_stage=PipelineStage(snapshot.pipeline_stage),
                 lead_score=snapshot.lead_score,
                 assigned_broker_id=snapshot.assigned_broker_id,
+                contact_reference=snapshot.contact_reference,
             )
             await self._leads.save(lead)
         return lead

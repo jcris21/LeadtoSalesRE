@@ -201,11 +201,23 @@ class Conversation(AggregateRoot):
     state: ConversationState = ConversationState.NEW
     ownership: Ownership = field(default_factory=Ownership.unassigned)
     last_contact_at: datetime = field(default_factory=utcnow)
+    #: External contact identifier (e.g. WhatsApp phone number), captured from
+    #: the Chatwoot webhook payload — the one key shared with wacrm's Lead
+    #: (Sprint 3 identity matching, see `LeadLinker`).
+    contact_reference: str | None = None
+    #: Resolved once a matching Lead is found via `contact_reference`; None
+    #: until then (e.g. the lead hasn't synced from wacrm yet).
+    lead_id: uuid.UUID | None = None
     id: uuid.UUID = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utcnow)
 
     def __post_init__(self) -> None:
         super().__init__()
+
+    def link_lead(self, lead_id: uuid.UUID) -> None:
+        """Records the Lead this conversation belongs to. Metadata only — not
+        a state transition, so it never touches `ALLOWED_TRANSITIONS`."""
+        self.lead_id = lead_id
 
     def transition_to(
         self,

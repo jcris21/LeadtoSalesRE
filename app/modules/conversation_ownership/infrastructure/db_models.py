@@ -37,6 +37,16 @@ class ConversationORM(Base):
     chatwoot_conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
     channel: Mapped[str] = mapped_column(String(32), nullable=False, default="whatsapp")
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="New", index=True)
+    #: External contact identifier (e.g. WhatsApp phone number) from the
+    #: Chatwoot payload; shared with wacrm's Lead.contact_reference so a
+    #: Conversation can be resolved to its Lead (Sprint 3 identity matching).
+    contact_reference: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    lead_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("leads.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     owner_type: Mapped[str] = mapped_column(String(16), nullable=False, default="unassigned")
     owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     owner_since: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

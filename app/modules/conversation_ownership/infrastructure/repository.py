@@ -47,6 +47,22 @@ class ConversationRepository:
         row = result.scalar_one_or_none()
         return self._to_domain(row) if row is not None else None
 
+    async def get_by_lead_id(
+        self, organization_id: uuid.UUID, lead_id: uuid.UUID
+    ) -> Conversation | None:
+        """Resolves the conversation to deliver a Recommendation/Appointment
+        message to, once the Coordinator only has a `lead_id` (e.g. reacting
+        to `ProfileCompleted`). None means no conversation has linked this
+        lead yet."""
+        result = await self._session.execute(
+            select(ConversationORM).where(
+                ConversationORM.organization_id == organization_id,
+                ConversationORM.lead_id == lead_id,
+            )
+        )
+        row = result.scalar_one_or_none()
+        return self._to_domain(row) if row is not None else None
+
     async def save(self, conversation: Conversation) -> None:
         row = await self._session.get(ConversationORM, conversation.id)
         if row is None:
@@ -58,6 +74,8 @@ class ConversationRepository:
         row.owner_since = conversation.ownership.since
         row.owner_reason = conversation.ownership.reason
         row.last_contact_at = conversation.last_contact_at
+        row.contact_reference = conversation.contact_reference
+        row.lead_id = conversation.lead_id
 
     async def list_inactive_since(
         self, cutoff: datetime, active_states: frozenset[ConversationState]
@@ -85,6 +103,8 @@ class ConversationRepository:
             owner_since=conversation.ownership.since,
             owner_reason=conversation.ownership.reason,
             last_contact_at=conversation.last_contact_at,
+            contact_reference=conversation.contact_reference,
+            lead_id=conversation.lead_id,
             created_at=conversation.created_at,
         )
 
@@ -103,6 +123,8 @@ class ConversationRepository:
                 reason=row.owner_reason,
             ),
             last_contact_at=row.last_contact_at,
+            contact_reference=row.contact_reference,
+            lead_id=row.lead_id,
             created_at=row.created_at,
         )
 

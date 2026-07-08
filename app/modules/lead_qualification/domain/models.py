@@ -201,6 +201,7 @@ class Lead(AggregateRoot):
         pipeline_stage: PipelineStage = PipelineStage.NEW,
         lead_score: float = 0.0,
         assigned_broker_id: uuid.UUID | None = None,
+        contact_reference: str | None = None,
         synced_at: datetime | None = None,
         created_at: datetime | None = None,
     ) -> None:
@@ -211,6 +212,7 @@ class Lead(AggregateRoot):
         self.pipeline_stage = pipeline_stage
         self.lead_score = lead_score
         self.assigned_broker_id = assigned_broker_id
+        self.contact_reference = contact_reference
         self.synced_at = synced_at or utcnow()
         self.created_at = created_at or utcnow()
 
@@ -226,6 +228,7 @@ class Lead(AggregateRoot):
         pipeline_stage: PipelineStage,
         lead_score: float,
         assigned_broker_id: uuid.UUID | None,
+        contact_reference: str | None = None,
         synced_at: datetime | None = None,
     ) -> None:
         """Apply the wacrm snapshot. Idempotent: re-applying the same snapshot
@@ -234,6 +237,8 @@ class Lead(AggregateRoot):
         self.pipeline_stage = pipeline_stage
         self.lead_score = lead_score
         self.assigned_broker_id = assigned_broker_id
+        if contact_reference is not None:
+            self.contact_reference = contact_reference
         self.synced_at = synced_at or utcnow()
         if stage_changed:
             self.record_event(

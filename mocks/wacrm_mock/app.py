@@ -29,6 +29,10 @@ class Lead(BaseModel):
     assigned_broker_id: str | None = None
     lead_score: float = 0.0
     updated_at: datetime
+    #: External contact identifier (e.g. WhatsApp phone number) shared with
+    #: Chatwoot, so the app can match a Conversation to this Lead without
+    #: either system inventing an id the other doesn't know about.
+    contact_reference: str | None = None
 
 
 _LEADS: dict[str, Lead] = {
@@ -39,6 +43,7 @@ _LEADS: dict[str, Lead] = {
         assigned_broker_id=None,
         lead_score=0.0,
         updated_at=datetime.now(UTC),
+        contact_reference="+5491100000000",
     )
 }
 
@@ -54,14 +59,22 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/leads", response_model=list[Lead])
-async def list_leads(organization_id: str, updated_since: datetime | None = None) -> list[Lead]:
+async def list_leads(
+    organization_id: str,
+    updated_since: datetime | None = None,
+    contact_reference: str | None = None,
+) -> list[Lead]:
     """CDC read used by the Lead Sync Adapter (Sprint 2, §7.7): leads of one
-    organization whose updated_at is strictly after the watermark."""
+    organization whose updated_at is strictly after the watermark. Also
+    supports an exact `contact_reference` filter, used to resolve which Lead
+    a Chatwoot Conversation belongs to (Sprint 3 identity matching)."""
     leads = [lead for lead in _LEADS.values() if lead.organization_id == organization_id]
     if updated_since is not None:
         if updated_since.tzinfo is None:
             updated_since = updated_since.replace(tzinfo=UTC)
         leads = [lead for lead in leads if lead.updated_at > updated_since]
+    if contact_reference is not None:
+        leads = [lead for lead in leads if lead.contact_reference == contact_reference]
     return sorted(leads, key=lambda lead: lead.updated_at)
 
 
