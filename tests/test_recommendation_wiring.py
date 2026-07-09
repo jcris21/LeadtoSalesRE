@@ -9,7 +9,8 @@ import pytest
 from sqlalchemy import select
 
 import app.modules.recommendation.wiring as recommendation_wiring
-from app.modules.conversation_ownership.domain.models import Conversation
+from app.modules.conversation_ownership.domain.models import Conversation, ConversationState
+from app.modules.conversation_ownership.infrastructure.db_models import ConversationORM
 from app.modules.conversation_ownership.infrastructure.repository import ConversationRepository
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
@@ -126,6 +127,7 @@ async def test_handle_profile_completed_delivers_top3_to_linked_conversation(
             organization_id=seeded_org,
             chatwoot_conversation_id="42",
             lead_id=seeded_lead,
+            state=ConversationState.QUALIFICATION,
         )
         await ConversationRepository(session).add(conversation)
         await session.commit()
@@ -145,6 +147,44 @@ async def test_handle_profile_completed_delivers_top3_to_linked_conversation(
         assert event.payload["fields"]["chatwoot_conversation_id"] == "42"
         assert event.payload["fields"]["conversation_id"] == str(conversation_id)
         assert "Encontré estas opciones" in event.payload["fields"]["response"]
+
+        # Qualification -> Recommendation fires exactly on ProfileCompleted
+        # (§7.8 QA-14 precondition), never inside the FSM itself.
+        convo_row = await session.get(ConversationORM, conversation_id)
+        assert convo_row.state == "Recommendation"
+
+
+@pytest.mark.asyncio
+async def test_handle_profile_completed_delivers_without_fsm_transition_outside_qualification(
+    session_factory, seeded_org, seeded_lead, complete_profile, matching_property
+):
+    """A conversation already past Qualification (e.g. handed off to a human)
+    still gets the recomputed Top-3 message, but its state is left alone —
+    the FSM edge only applies from Qualification."""
+    async with session_factory() as session:
+        conversation = Conversation(
+            organization_id=seeded_org,
+            chatwoot_conversation_id="42",
+            lead_id=seeded_lead,
+            state=ConversationState.RECOMMENDATION,
+        )
+        await ConversationRepository(session).add(conversation)
+        await session.commit()
+        conversation_id = conversation.id
+
+    await recommendation_wiring.handle_profile_completed(
+        _profile_completed_payload(organization_id=seeded_org, lead_id=seeded_lead)
+    )
+
+    async with session_factory() as session:
+        convo_row = await session.get(ConversationORM, conversation_id)
+        assert convo_row.state == "Recommendation"
+        event = (
+            await session.execute(
+                select(OutboxEventORM).where(OutboxEventORM.event_type == "ResponseReady")
+            )
+        ).scalar_one()
+        assert event.payload["fields"]["conversation_id"] == str(conversation_id)
 
 
 @pytest.mark.asyncio

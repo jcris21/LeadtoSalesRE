@@ -140,8 +140,11 @@ class Conversation {
   +ConversationState state
   +Ownership ownership
   +DateTime lastContactAt
+  +String contactReference
+  +UUID leadId
   +transitionTo(state)
   +decayToDormant()
+  +linkLead(leadId)
 }
 class ConversationState {
   <<Enumeration>>
@@ -212,6 +215,7 @@ class Lead {
   +PipelineStage pipelineStage
   +Decimal leadScore
   +UUID assignedBrokerId
+  +String contactReference
   +DateTime syncedAt
   +isStale() Boolean
 }
@@ -1633,6 +1637,101 @@ sequenceDiagram
     Note over LB,R1n: Deploy completo sin downtime — ninguna conversación se pierde porque el estado vive en Postgres, no en el proceso
 ```
 
+### 7.28 Conversation↔Lead identity matching (`LeadLinker`) y entrega del Top-3 al Coordinator
+
+Chatwoot y wacrm son dos sistemas externos sin identificador propio en común. `contact_reference` (el número de WhatsApp del lead) es el único valor que ambos exponen, y pasa a ser la clave de emparejamiento — ver Iteración 4 en la tabla de decisiones de la Sección 10.
+
+```mermaid
+sequenceDiagram
+    actor Lead
+    participant Webhook as Chatwoot Webhook Adapter
+    participant Linker as LeadLinker
+    participant LeadRepo as Lead Repository (mirror local)
+    participant Conv as Conversation
+
+    Lead->>Webhook: mensaje entrante (WhatsApp)
+    Webhook->>Webhook: extrae contact_reference (sender.phone_number)
+    Webhook->>Conv: get_or_create(chatwoot_conversation_id)
+    alt Conversation.lead_id aún no resuelto
+        Webhook->>Linker: link_if_possible(conversation)
+        Linker->>LeadRepo: get_by_contact_reference(org_id, contact_reference)
+        alt Lead ya sincronizado localmente (§7.7 CDC)
+            LeadRepo-->>Linker: Lead
+            Linker->>Conv: link_lead(lead.id)
+        else Lead aún no sincronizado
+            LeadRepo-->>Linker: None
+            Note over Linker,Conv: lead_id queda en None — reintento en el próximo mensaje, no es un error
+        end
+    end
+    Webhook->>Conv: save()
+```
+
+Una vez resuelto el link, `recommendation.wiring.handle_profile_completed` (§7.10) puede resolver la `Conversation` a partir de un `lead_id` — el único dato que trae el evento `ProfileCompleted` — y entregarle el Top-3 sin que el Coordinator necesite un mecanismo de entrega nuevo:
+
+```mermaid
+sequenceDiagram
+    participant Bus
+    participant RecoWiring
+    participant Reco
+    participant ConvRepo
+    participant Chatwoot
+    actor Lead
+
+    Bus->>RecoWiring: ProfileCompleted
+    RecoWiring->>Reco: search
+    Reco-->>RecoWiring: Top 3
+    RecoWiring->>ConvRepo: get_by_lead_id
+
+    alt Conversation existe
+        ConvRepo-->>RecoWiring: Conversation
+        RecoWiring->>Bus: ResponseReady
+        Bus->>Chatwoot: deliver
+        Chatwoot->>Lead: Top 3
+    else Conversation no existe
+        RecoWiring->>RecoWiring: Mantener recomendación sin enviar
+    end
+```
+
+**Decisión de diseño clave:** `recommendation.wiring` reutiliza el evento `ResponseReady` y el handler `conversation_ownership.wiring.handle_response_ready` que ya existen para las respuestas conversacionales normales — no se creó un segundo canal de entrega a Chatwoot. Esto mantiene un único punto de salida hacia el lead, consistente con CON-1.
+
+### 7.29 FSM: AIOwned→Qualification (momentáneo) y Qualification→Recommendation (gateada por QA-14)
+
+Dos transiciones de la FSM de `Conversation` (§6.1) que estaban definidas en `ALLOWED_TRANSITIONS` desde la Iteración 2 pero nunca se disparaban en código hasta el cierre de Sprint 3:
+
+```mermaid
+sequenceDiagram
+    actor Lead
+    participant Coord as Coordinator Agent
+    participant FSM as Conversation FSM
+    participant OPE as Ownership Policy Engine
+    participant RecoWiring as Recommendation Wiring
+    participant Gate as Completeness Gate
+
+    Lead->>Coord: Primer mensaje
+    Coord->>OPE: Evaluar contexto
+    OPE-->>Coord: OwnershipDecision AI
+
+    Coord->>FSM: transitionTo(AIOwned)
+    Note over Coord,FSM: Estado temporal
+
+    Coord->>FSM: transitionTo(Qualification)
+    Coord-->>Lead: Respuesta
+
+    Note over Lead,Gate: Turnos posteriores de calificación
+
+    Gate->>Gate: Profile completo
+    Gate-->>RecoWiring: ProfileCompleted
+    RecoWiring->>FSM: transitionTo(Recommendation)
+
+    Note over RecoWiring,FSM: La transición solo ocurre cuando el Gate emite ProfileCompleted.
+```
+
+**Por qué `AIOwned -> Qualification` se dispara en el mismo turno que `New -> AIOwned`:** `AIOwned` es el estado que resulta de la decisión de ownership (quién es dueño de la conversación), no una fase de trabajo en sí misma — la fase de trabajo que sigue inmediatamente es calificar al lead. Separar ambas transiciones en el mismo método de `CoordinatorAgent` evita un estado intermedio sin sentido de negocio.
+
+**Por qué `Qualification -> Recommendation` se dispara desde `recommendation.wiring`, no desde el Coordinator ni desde la FSM:** el Completeness Gate es explícitamente un Specification pattern externo a la FSM (Iteración 3, ADR "QA-14 completitud ≥90%") — la FSM permanece genérica y el único punto de verdad para "¿puede avanzar?" vive en el Gate. El evento `ProfileCompleted` es, por construcción, el momento exacto en que el Gate cruzó el umbral, así que es el disparador natural de este edge sin duplicar la evaluación en otro lugar.
+
+**Alcance explícitamente fuera de esta iteración:** ninguna transición hacia `Recommendation` ocurre si la `Conversation` ya avanzó a un estado posterior (`AssignedHuman`, `Appointment`, etc.) — en ese caso `recommendation.wiring` sigue entregando el mensaje con el Top-3 recalculado, pero no fuerza un retroceso de estado. Progressive Profiling (extraer `ProfilePatch` de texto libre) tampoco quedó conectado al turno conversacional del Coordinator en esta iteración — sigue siendo el gap documentado en la Iteración 3 (E3, nodo LangGraph de Qualification nunca implementado).
+
 ## 8. Interfaces
 
 Puertos expuestos por los elementos de infraestructura instanciados en esta iteración (contratos internos; los puertos de cada bounded context se definen en su iteración correspondiente):
@@ -1734,9 +1833,9 @@ Todos los eventos de dominio publicados vía el Event Bus interno (Outbox/Inbox,
 |---|---|---|---|
 | `MessageReceived` | Chatwoot Webhook Adapter (Iter. 2) | conversationId, sender, text, timestamp | Coordinator Agent, Knowledge Graph Builder |
 | `ResponseReady` | Coordinator Agent (Iter. 2) | conversationId, response | Chatwoot Webhook Adapter |
-| `ProfileCompleted` | BuyerProfile Capture Service (Iter. 3) | leadId, completeness%, profile | Lead Sync Adapter (→ wacrm), Recommendation |
+| `ProfileCompleted` | BuyerProfile Capture Service (Iter. 3) | leadId, completeness%, profile | Lead Sync Adapter (→ wacrm), Recommendation (`recommendation.wiring`, §7.28-7.29: dispara `Qualification -> Recommendation` y publica el Top-3) |
 | `CRMStageSynced` | Lead Sync Adapter (Iter. 3) | leadId, pipelineStage, syncedAt | Ownership Policy Engine, Staleness Guard |
-| `RecommendationGenerated` | Ranking Engine (Iter. 4) | conversationId, Top-3, signals | Coordinator Agent, AI Sidebar |
+| ~~`RecommendationGenerated`~~ | — | — | **Superado en la implementación (§7.28):** `recommendation.wiring` publica directamente `ResponseReady` con el Top-3 ya formateado, reutilizando el canal de entrega existente del Coordinator en vez de un evento intermedio nuevo — un `RecommendationGenerated` separado no aportaba un consumidor adicional real |
 | `NeighborhoodEnriched` | Neighborhood Enrichment Adapter (Iter. 4) | propertyId, insights | Coordinator Agent (mensaje de seguimiento) |
 | `AppointmentBooked` | Scheduling Service (Iter. 5) | appointmentId, calendarEventId, meetLink | Reminder Scheduler, Handoff Package Builder |
 | `ReminderDue` | Reminder Scheduler (Iter. 5) | appointmentId, leadTime (24h\|2h) | Notificación al lead |
@@ -1799,6 +1898,9 @@ Todos los eventos de dominio publicados vía el Event Bus interno (Outbox/Inbox,
 | QA-01 (recomendación completa <15s) | **Parallelization (fan-out/fan-in)** del enriquecimiento de vecindario sobre el Top-3 ya rankeado, con **embeddings precalculados** en la ingesta de inventario | El enriquecimiento concurrente evita 3x la latencia de consultar Maps secuencialmente; embeddings precalculados eliminan el costo/latencia de generarlos en cada búsqueda | Enriquecer secuencialmente cada propiedad (arriesga el presupuesto de 15s); generar embeddings on-the-fly en cada búsqueda (latencia y costo repetidos innecesarios) |
 | QA-01 (resiliencia) | **Timeout con fallback parcial** en Neighborhood Enrichment: si Maps no responde a tiempo, se entrega el Top-3 sin ese enriquecimiento y se completa asíncronamente vía el Event Bus | Prioriza cumplir el presupuesto de latencia sobre la completitud del mensaje; el lead recibe la recomendación a tiempo y el detalle de vecindario llega después si aplica | Bloquear toda la respuesta hasta que Maps responda (viola el límite duro de 15s si Maps está lento o caído) |
 | E5 (Neighborhood Intelligence) | Neighborhood Enrichment Adapter como componente separado del Ranking Engine, consumido solo después de tener el Top-3 final | Minimiza llamadas a Google Maps (solo 3 propiedades, no todos los candidatos filtrados), manteniendo el costo y la latencia acotados | Enriquecer todos los candidatos antes de rankear (multiplica llamadas a Maps innecesariamente, sin beneficio en el resultado final) |
+| CON-1, CON-2 (identidad entre sistemas) | `contact_reference` (teléfono de WhatsApp) como identificador compartido entre `Lead` (wacrm) y `Conversation` (Chatwoot), resuelto por `LeadLinker` de forma best-effort y reintentada en cada mensaje (§7.28) | Es el único valor que ambos sistemas externos ya exponen — no requiere que ninguno de los dos invente un id para el otro; un link no resuelto es un estado normal y temporal (CDC eventualmente consistente, §7.7), nunca un error | Generar un `crm_lead_id` propio en la app al crear la Conversation (viola CON-2: wacrm dejaría de ser el único origen del id de Lead; genera leads fantasma si el CDC luego trae el lead real con otro id) |
+| E4 (orquestación Coordinator↔Recommendation) | `RecommendationService` (facade `RecommendationPort`) invocado desde `recommendation.wiring` al consumir `ProfileCompleted`, entregando el Top-3 reutilizando `ResponseReady` — el mismo evento que ya usa el Coordinator para respuestas conversacionales | Un único canal de salida hacia Chatwoot (consistente con CON-1); no se duplica lógica de envío ni se agrega un nuevo tipo de evento solo para este flujo | Un `ChatwootClient` propio dentro de `recommendation` para enviar el mensaje directamente (duplica la lógica de entrega ya resuelta en `conversation_ownership`, dos puntos de salida hacia el mismo lead) |
+| E2, E4 (FSM `Qualification -> Recommendation`) | La transición se dispara desde `recommendation.wiring.handle_profile_completed`, no desde el Coordinator ni dentro de la FSM — el evento `ProfileCompleted` ES el momento en que el Completeness Gate (Iteración 3, QA-14) cruzó el umbral (§7.29) | Reutiliza el único punto de verdad ya existente para "¿puede avanzar?" sin duplicar la evaluación del Gate en un segundo lugar; la FSM sigue sin conocer la regla de negocio de completitud | Que el Coordinator re-evalúe el Gate en cada turno para decidir la transición (duplica la evaluación que `ProfileCompleted` ya garantiza que ocurrió exactamente una vez) |
 
 ### Iteración 5 — Cierre del flujo operativo de ventas
 

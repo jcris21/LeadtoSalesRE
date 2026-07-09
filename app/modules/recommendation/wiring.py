@@ -21,7 +21,7 @@ import uuid
 import httpx
 
 from app.core.database import get_session_factory
-from app.modules.conversation_ownership.domain.models import ResponseReady
+from app.modules.conversation_ownership.domain.models import ConversationState, ResponseReady
 from app.modules.conversation_ownership.infrastructure.repository import ConversationRepository
 from app.modules.lead_qualification.application.completeness_gate import CompletenessGate
 from app.modules.lead_qualification.infrastructure.repository import BuyerProfileRepository
@@ -121,6 +121,27 @@ async def handle_profile_completed(payload: dict) -> None:
             )
             await session.commit()
             return
+
+        if conversation.state is ConversationState.QUALIFICATION:
+            # The Specification pattern's verdict (QA-14, §7.8) IS the
+            # precondition for this FSM edge — evaluated here, never inside
+            # the FSM itself (ArchitecturalDrivers Decision Table: keeps the
+            # FSM generic, the business rule lives in its own module).
+            conversation.transition_to(
+                ConversationState.RECOMMENDATION,
+                reason="BuyerProfile completeness threshold reached",
+            )
+            await conversations.save(conversation)
+        elif conversation.state is not ConversationState.RECOMMENDATION:
+            # Already past Recommendation (e.g. AssignedHuman, Appointment) or
+            # never reached Qualification — the FSM edge doesn't apply, but a
+            # re-computed Top-3 is still worth delivering as a message.
+            logger.info(
+                "Delivering recommendation to conversation %s in state %s "
+                "without an FSM transition (not in Qualification)",
+                conversation.id,
+                conversation.state.value,
+            )
 
         await event_bus.publish(
             session,

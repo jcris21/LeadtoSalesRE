@@ -176,6 +176,18 @@ class CoordinatorAgent:
                 reason=decision.explanation,
                 owner_type=OwnerType.AI,
             )
+            # An AI-owned lead's very next job is qualification (§6.1
+            # ArchitecturalDrivers: AIOwned -> Qualification -> Recommendation);
+            # AIOwned itself is momentary, not a state the AI lingers in.
+            # Qualification -> Recommendation is a separate, explicit
+            # transition gated by BuyerProfile completeness (QA-14), fired
+            # from `recommendation.wiring.handle_profile_completed` — never
+            # here, since the FSM only owns lifecycle shape, not that
+            # business rule (§7.8, ArchitecturalDrivers Decision Table row).
+            conversation.transition_to(
+                ConversationState.QUALIFICATION,
+                reason="Ownership assigned to AI; beginning conversational qualification",
+            )
 
         system_prompt = await self._load_system_prompt(conversation.organization_id)
         response = await self._responder.respond(

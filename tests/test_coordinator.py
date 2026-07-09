@@ -55,7 +55,9 @@ async def test_first_message_gives_ai_ownership_and_publishes_response(session_f
 
     async with session_factory() as session:
         convo = await session.get(ConversationORM, conversation_id)
-        assert convo.state == "AIOwned"
+        # AIOwned is momentary: the same turn advances straight into
+        # Qualification (§6.1 ArchitecturalDrivers), ownership unchanged.
+        assert convo.state == "Qualification"
         assert convo.owner_type == "ai"
 
         decision = (await session.execute(select(OwnershipDecisionORM))).scalar_one()
