@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,7 +85,7 @@ class LeadSyncAdapter:
 
         max_seen = watermark
         events = []
-        skipped = 0
+        earliest_skipped: datetime | None = None
         for snapshot in snapshots:
             try:
                 lead = await self._upsert_from_snapshot(organization_id, snapshot)
@@ -100,18 +101,22 @@ class LeadSyncAdapter:
                     organization_id,
                     snapshot.pipeline_stage,
                 )
-                skipped += 1
+                if earliest_skipped is None or snapshot.updated_at < earliest_skipped:
+                    earliest_skipped = snapshot.updated_at
                 continue
             events.extend(lead.pull_domain_events())
             if snapshot.updated_at > max_seen:
                 max_seen = snapshot.updated_at
 
-        # Hold the watermark while anything was skipped: fixing a stage NAME in
-        # wacrm doesn't touch the deal's updated_at, so advancing past a skipped
-        # lead would drop it forever. Re-polling the same window is harmless
-        # (upserts are idempotent) and self-heals once the operator fixes the
-        # stage; the warning above re-fires each cycle until then.
-        if snapshots and not skipped:
+        # The watermark must never pass a skipped lead: fixing a stage NAME in
+        # wacrm doesn't touch the deal's updated_at, so advancing past it would
+        # drop the lead forever. Advance up to just before the earliest skipped
+        # lead instead — leads updated before it stop being re-fetched, the bad
+        # lead (and anything after it) re-polls each cycle (idempotent upserts
+        # make that harmless) and self-heals once the operator fixes the stage.
+        if earliest_skipped is not None:
+            max_seen = min(max_seen, earliest_skipped - timedelta(microseconds=1))
+        if max_seen > watermark:
             await self._cursor.advance_watermark(organization_id, max_seen)
         if events:
             await event_bus.publish(self._session, events)

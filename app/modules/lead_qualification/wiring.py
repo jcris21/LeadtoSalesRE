@@ -38,6 +38,13 @@ async def _build_wacrm_client(session, organization_id: uuid.UUID) -> WacrmClien
     crm = config.crm if config is not None else None
     if crm is None:
         return WacrmClient()
+    if not crm.base_url or not crm.api_key:
+        # A present-but-incomplete CrmConfig must fail loudly here, not surface
+        # later as an opaque 401 from an unauthenticated request.
+        raise ValueError(
+            f"Organization {organization_id} has a CrmConfig with a blank "
+            "base_url or api_key; fix or remove it"
+        )
     return WacrmClient(
         base_url=crm.base_url, api_key=crm.api_key, organization_id=organization_id
     )

@@ -78,6 +78,12 @@ def _unwrap(payload: object) -> object:
     return payload
 
 
+#: Hard ceiling on pages followed per list call (50 items/page default →
+#: 10k deals). A wacrm bug that never returns a null cursor, or an absurd
+#: backlog, must fail loudly instead of hanging the org's poll forever.
+MAX_LIST_PAGES = 200
+
+
 class WacrmClient:
     def __init__(
         self,
@@ -103,7 +109,7 @@ class WacrmClient:
         snapshots: list[WacrmLeadSnapshot] = []
         cursor: str | None = None
         async with self._http() as client:
-            while True:
+            for _ in range(MAX_LIST_PAGES):
                 page_params = dict(params)
                 if cursor:
                     page_params["cursor"] = cursor
@@ -118,6 +124,10 @@ class WacrmClient:
                 cursor = meta.get("next_cursor") if isinstance(meta, dict) else None
                 if not cursor:
                     return snapshots
+        # Partial data must never advance a CDC watermark — abort the call.
+        raise RuntimeError(
+            f"wacrm /deals pagination did not terminate within {MAX_LIST_PAGES} pages"
+        )
 
     async def get_lead(self, crm_lead_id: str) -> WacrmLeadSnapshot | None:
         async with self._http() as client:
