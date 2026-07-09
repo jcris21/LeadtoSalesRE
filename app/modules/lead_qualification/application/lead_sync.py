@@ -84,13 +84,34 @@ class LeadSyncAdapter:
 
         max_seen = watermark
         events = []
+        skipped = 0
         for snapshot in snapshots:
-            lead = await self._upsert_from_snapshot(organization_id, snapshot)
+            try:
+                lead = await self._upsert_from_snapshot(organization_id, snapshot)
+            except ValueError:
+                # Real wacrm stage names are free text set by brokers; one lead
+                # whose stage doesn't match our closed PipelineStage enum must
+                # not abort the whole org's poll (it used to take down CDC for
+                # the entire organization).
+                logger.warning(
+                    "Skipping lead %s in organization %s: pipeline stage %r "
+                    "does not match the required stage-naming contract",
+                    snapshot.crm_lead_id,
+                    organization_id,
+                    snapshot.pipeline_stage,
+                )
+                skipped += 1
+                continue
             events.extend(lead.pull_domain_events())
             if snapshot.updated_at > max_seen:
                 max_seen = snapshot.updated_at
 
-        if snapshots:
+        # Hold the watermark while anything was skipped: fixing a stage NAME in
+        # wacrm doesn't touch the deal's updated_at, so advancing past a skipped
+        # lead would drop it forever. Re-polling the same window is harmless
+        # (upserts are idempotent) and self-heals once the operator fixes the
+        # stage; the warning above re-fires each cycle until then.
+        if snapshots and not skipped:
             await self._cursor.advance_watermark(organization_id, max_seen)
         if events:
             await event_bus.publish(self._session, events)

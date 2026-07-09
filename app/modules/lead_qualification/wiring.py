@@ -20,10 +20,27 @@ from app.modules.lead_qualification.application.lead_sync import (
     LeadNotFoundError,
     LeadSyncAdapter,
 )
+from app.modules.lead_qualification.infrastructure.repository import LeadRepository
+from app.modules.lead_qualification.infrastructure.wacrm_client import WacrmClient
 from app.modules.organization.infrastructure.db_models import OrganizationORM
+from app.modules.organization.infrastructure.repository import OrganizationConfigRepository
 from app.shared.infrastructure.event_bus import EventBusWorker
 
 logger = logging.getLogger(__name__)
+
+
+async def _build_wacrm_client(session, organization_id: uuid.UUID) -> WacrmClient:
+    """Per-organization client: orgs with a `CrmConfig` talk to their real wacrm
+    instance with their own API key; orgs without one keep the legacy global
+    `settings.wacrm_base_url` (the local mock) with no auth — no breaking
+    change for dev environments that haven't onboarded a real CRM yet."""
+    config = await OrganizationConfigRepository(session).get(organization_id)
+    crm = config.crm if config is not None else None
+    if crm is None:
+        return WacrmClient()
+    return WacrmClient(
+        base_url=crm.base_url, api_key=crm.api_key, organization_id=organization_id
+    )
 
 
 async def handle_profile_completed(payload: dict) -> None:
@@ -31,7 +48,12 @@ async def handle_profile_completed(payload: dict) -> None:
     lead_id = uuid.UUID(fields["lead_id"])
 
     async with get_session_factory()() as session:
-        adapter = LeadSyncAdapter(session)
+        lead = await LeadRepository(session).get(lead_id)
+        if lead is None:
+            logger.error("ProfileCompleted for unknown lead %s; dropping", lead_id)
+            return
+        client = await _build_wacrm_client(session, lead.organization_id)
+        adapter = LeadSyncAdapter(session, client=client)
         try:
             await adapter.push_profile_update(lead_id, actor="system.event_bus")
         except LeadNotFoundError:
@@ -66,7 +88,8 @@ async def sync_all_organizations_once() -> int:
     for organization_id in organization_ids:
         try:
             async with factory() as session:
-                adapter = LeadSyncAdapter(session)
+                client = await _build_wacrm_client(session, organization_id)
+                adapter = LeadSyncAdapter(session, client=client)
                 total += await adapter.poll_once(organization_id)
                 await session.commit()
         except Exception:  # noqa: BLE001 - isolate per-organization failures
