@@ -10,6 +10,13 @@ way the Staleness Guard gates critical CRM decisions — `search()` refuses to
 run the (expensive) pipeline against a profile that isn't ready yet, mirroring
 `Documents/Oficial/ImplementationPlan.md` Sprint 3's stated dependency
 ("Sprint 2: perfil completo como precondición de búsqueda").
+
+QA-13 precondition: `search()` is itself a critical business decision over
+`Lead` data (§7.9), so it runs through the Staleness Guard first — mirroring
+Architecture.md's sequence diagram (Coordinator -> Guard -> force re-sync if
+stale -> proceed with fresh data). This is the missing wiring the Staleness
+Guard needed: the guard's own logic was already correct, it just had no
+caller on any real decision path.
 """
 
 from __future__ import annotations
@@ -44,6 +51,15 @@ class BuyerProfileLookup(Protocol):
     async def get_by_lead_id(self, lead_id: uuid.UUID) -> BuyerProfile | None: ...
 
 
+class StalenessCheck(Protocol):
+    """The one Staleness Guard call this facade needs (§7.9, QA-13). Satisfied
+    structurally by `app.modules.lead_qualification.application.staleness_guard
+    .StalenessGuard` — no import of that class (or of `AsyncSession`) here, so
+    this module stays testable without a DB."""
+
+    async def check_before_decision(self, lead_id: uuid.UUID) -> object: ...
+
+
 class RecommendationService:
     """`RecommendationPort` implementation."""
 
@@ -57,6 +73,7 @@ class RecommendationService:
         explanation: ExplanationPort,
         neighborhood_enrichment: NeighborhoodEnrichmentPort,
         completeness_gate: CompletenessGate | None = None,
+        staleness_guard: StalenessCheck | None = None,
         semantic_top_n: int | None = None,
         top_k: int | None = None,
         enrichment_timeout_ms: int | None = None,
@@ -69,6 +86,7 @@ class RecommendationService:
         self._explanation = explanation
         self._neighborhood_enrichment = neighborhood_enrichment
         self._completeness_gate = completeness_gate or CompletenessGate()
+        self._staleness_guard = staleness_guard
         self._semantic_top_n = semantic_top_n or settings.recommendation_semantic_top_n
         self._top_k = top_k or settings.recommendation_top_k
         self._enrichment_timeout_ms = (
@@ -78,6 +96,14 @@ class RecommendationService:
     async def search(
         self, *, organization_id: uuid.UUID, lead_id: uuid.UUID
     ) -> RecommendationResult:
+        if self._staleness_guard is not None:
+            # §7.9: forces a synchronous re-sync when the Lead mirror exceeded
+            # the staleness bound, then proceeds with fresh data. No
+            # warn-and-continue fallback — a `LeadNotFoundError` here is
+            # allowed to propagate and abort the search rather than run a
+            # critical decision on data that may be stale or gone.
+            await self._staleness_guard.check_before_decision(lead_id)
+
         buyer_profile = await self._buyer_profiles.get_by_lead_id(lead_id)
         if buyer_profile is None:
             raise IncompleteProfileError(f"No BuyerProfile found for lead {lead_id}")

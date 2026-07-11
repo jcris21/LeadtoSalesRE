@@ -124,6 +124,17 @@ class FakeNeighborhoodEnrichment:
         return self.insights
 
 
+class FakeStalenessGuard:
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+        self.calls: list[uuid.UUID] = []
+
+    async def check_before_decision(self, lead_id: uuid.UUID) -> None:
+        self.calls.append(lead_id)
+        if self.error is not None:
+            raise self.error
+
+
 def _service(
     *,
     profile: BuyerProfile | None,
@@ -131,6 +142,7 @@ def _service(
     retrieved: list[Property],
     ranked: list[RankedCandidate],
     insights: dict[uuid.UUID, NeighborhoodInsight | None],
+    staleness_guard: FakeStalenessGuard | None = None,
 ) -> tuple[RecommendationService, dict]:
     fakes = {
         "buyer_profiles": FakeBuyerProfiles(profile),
@@ -139,6 +151,7 @@ def _service(
         "ranking_engine": FakeRankingEngine(ranked),
         "explanation": FakeExplanation(),
         "neighborhood_enrichment": FakeNeighborhoodEnrichment(insights),
+        "staleness_guard": staleness_guard,
     }
     service = RecommendationService(
         buyer_profiles=fakes["buyer_profiles"],
@@ -148,6 +161,7 @@ def _service(
         explanation=fakes["explanation"],
         neighborhood_enrichment=fakes["neighborhood_enrichment"],
         completeness_gate=CompletenessGate(threshold=90.0),
+        staleness_guard=staleness_guard,
     )
     return service, fakes
 
@@ -290,3 +304,67 @@ async def test_search_returns_empty_result_when_no_candidates_survive_filtering(
     assert result.items == ()
     # Nothing downstream of filtering should be invoked with empty input.
     assert fakes["semantic_retrieval"].calls[0]["candidates"] == []
+
+
+@pytest.mark.asyncio
+async def test_search_checks_staleness_before_anything_else():
+    """§7.9/QA-13: `search()` is a critical business decision over Lead data,
+    so it must run through the Staleness Guard before touching the profile
+    or the pipeline — this is the wiring that closes the Sprint 2 gap."""
+    lead_id = uuid.uuid4()
+    profile = _complete_profile(lead_id)
+    candidate = _property()
+    ranked = [RankedCandidate(property_id=candidate.id, score=1.0, signals=())]
+    guard = FakeStalenessGuard()
+
+    service, _ = _service(
+        profile=profile,
+        candidates=[candidate],
+        retrieved=[candidate],
+        ranked=ranked,
+        insights={candidate.id: None},
+        staleness_guard=guard,
+    )
+
+    await service.search(organization_id=uuid.uuid4(), lead_id=lead_id)
+
+    assert guard.calls == [lead_id]
+
+
+@pytest.mark.asyncio
+async def test_search_propagates_staleness_guard_errors_without_running_pipeline():
+    lead_id = uuid.uuid4()
+    profile = _complete_profile(lead_id)
+    guard = FakeStalenessGuard(error=RuntimeError("lead vanished"))
+
+    service, fakes = _service(
+        profile=profile,
+        candidates=[_property()],
+        retrieved=[],
+        ranked=[],
+        insights={},
+        staleness_guard=guard,
+    )
+
+    with pytest.raises(RuntimeError, match="lead vanished"):
+        await service.search(organization_id=uuid.uuid4(), lead_id=lead_id)
+
+    assert fakes["structured_filter"].calls == []
+
+
+@pytest.mark.asyncio
+async def test_search_skips_staleness_check_when_no_guard_configured():
+    """Backward-compatible default: unit tests (and any caller) that don't
+    pass a `staleness_guard` still work — only the real wiring path
+    (`recommendation.wiring.handle_profile_completed`) is required to pass
+    one in production."""
+    lead_id = uuid.uuid4()
+    profile = _complete_profile(lead_id)
+
+    service, _ = _service(
+        profile=profile, candidates=[], retrieved=[], ranked=[], insights={}
+    )
+
+    result = await service.search(organization_id=uuid.uuid4(), lead_id=lead_id)
+
+    assert result.items == ()

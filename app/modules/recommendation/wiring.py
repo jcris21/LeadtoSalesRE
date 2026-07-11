@@ -24,6 +24,8 @@ from app.core.database import get_session_factory
 from app.modules.conversation_ownership.domain.models import ConversationState, ResponseReady
 from app.modules.conversation_ownership.infrastructure.repository import ConversationRepository
 from app.modules.lead_qualification.application.completeness_gate import CompletenessGate
+from app.modules.lead_qualification.application.lead_sync import LeadNotFoundError
+from app.modules.lead_qualification.application.staleness_guard import StalenessGuard
 from app.modules.lead_qualification.infrastructure.repository import BuyerProfileRepository
 from app.modules.recommendation.application.explanation_generator import ExplanationGenerator
 from app.modules.recommendation.application.neighborhood_enrichment import (
@@ -101,6 +103,7 @@ async def handle_profile_completed(payload: dict) -> None:
             explanation=ExplanationGenerator(),
             neighborhood_enrichment=_get_enrichment_adapter(),
             completeness_gate=CompletenessGate(),
+            staleness_guard=StalenessGuard(session),
         )
         try:
             result = await service.search(organization_id=organization_id, lead_id=lead_id)
@@ -109,6 +112,16 @@ async def handle_profile_completed(payload: dict) -> None:
             # disagreed (e.g. a lower per-call threshold elsewhere) — nothing
             # to recommend yet, not an error worth failing the outbox delivery.
             logger.info("Recommendation skipped for lead %s: profile incomplete", lead_id)
+            return
+        except LeadNotFoundError:
+            # The Staleness Guard (§7.9) found no Lead mirror to re-sync —
+            # the lead was removed/merged after ProfileCompleted fired. There
+            # is nothing to recommend against; log and drop rather than fail
+            # the outbox delivery for a lead that no longer exists.
+            logger.warning(
+                "Recommendation skipped for lead %s: Lead not found during staleness check",
+                lead_id,
+            )
             return
 
         conversations = ConversationRepository(session)
