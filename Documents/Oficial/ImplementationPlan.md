@@ -78,6 +78,65 @@
 
 ---
 
+## Sprint 2/3 — Fase 2 (cierre de gaps de granularidad HU)
+
+**Nota:** Sprint 2 y Sprint 3 (arriba) cierran a nivel de Epic (E3/E7 y E4/E5 → "Satisfied" en su Definition
+of Done), pero el catálogo de Historias de Usuario (`Documents/Oficial/HU_Calificacion_Recomendacion.md`)
+descompuso ambos Epics a grano fino y encontró 10 gaps no cubiertos por esa Definition of Done original.
+Esta fase los cierra, organizada en sub-sprints paralelizables donde no hay dependencia dura entre HUs.
+
+### Sprint 2.1 — Qualification: extracción y clasificación (paralelizable)
+
+| Elemento a construir | HU | Depende de |
+|---|---|---|
+| Ampliar BuyerProfile a 6 dimensiones (financiamiento, decisión) | US-208 | US-202–205 (Sprint 2, ya implementado) |
+| Clasificación Hot/Warm/Cold + tabla `lead_objections` | US-209 | Ninguna |
+| Extracción NLU de señales libres de la conversación → tabla `conversation_memory` | AI-102 | Ninguna |
+
+### Sprint 2.2 — Qualification: perfil de afinidad (secuencial)
+
+| Elemento a construir | HU | Depende de |
+|---|---|---|
+| Agregación de `conversation_memory` → `buyer_profiles.ai_profile` + `leads.buyer_persona` | US-211 | AI-102 (Sprint 2.1) |
+
+**Definition of Done:** las 6 dimensiones del Customer Journey capturadas (no solo las 5 de
+`PROFILE_DIMENSIONS`), clasificación comercial Hot/Warm/Cold activa, perfil de afinidad (`ai_profile`)
+disponible como señal para el Ranking Engine de Sprint 3.
+
+**Dependencias:** Sprint 2 (`BuyerProfileCaptureService`, `CompletenessGate` ya construidos).
+
+---
+
+### Sprint 3.1 — Recommendation: correcciones de esquema y persistencia (paralelizable, máxima prioridad)
+
+| Elemento a construir | HU | Depende de |
+|---|---|---|
+| Reconciliar esquema `properties` (drift `zone`/`District`/`name_address`/`Link_references`/`estado`; normalizar a snake_case; `link_references` a `jsonb` para soportar múltiples fotos/video/PDF) | US-309 | Ninguna — 🔴 bug activo en Postgres real, prioridad máxima de toda esta fase |
+| Reemplazar `HashEmbeddingModel` por un modelo de embeddings real (1536-dim) | US-308 | Ninguna |
+| Persistir `RecommendationResult` en tabla `recommendations` | US-310 | Ninguna — US-305/306/307 (Sprint 3) ya producen el output que esta HU solo necesita guardar |
+
+### Sprint 3.2 — Recommendation: hybrid retrieval real (secuencial)
+
+| Elemento a construir | HU | Depende de |
+|---|---|---|
+| Filtro estructurado por SQL `WHERE` (reemplaza filtro en Python) | US-303 | US-309 (Sprint 3.1) |
+| Retrieval semántico con operador pgvector `<->` (reemplaza cosine similarity en Python) | US-304 | US-308 (Sprint 3.1) |
+
+### Sprint 3.3 — Recommendation: capa agéntica (última, mayor alcance)
+
+| Elemento a construir | HU | Depende de |
+|---|---|---|
+| Coordinator Agent + Intent Router LLM-backed, reemplaza la orquestación hardcodeada de `wiring.py` | AI-104 | No bloquea ni es bloqueada técnicamente por 3.1/3.2 — se secuencia al final para orquestar un pipeline ya production-ready en vez del stub actual |
+
+**Definition of Done:** Structured Filter y Semantic Retrieval corriendo contra Postgres/pgvector real (no
+Python en memoria), recomendaciones auditables en `recommendations`, orquestación conversacional
+reemplazando el `wiring.py` actual.
+
+**Dependencias:** Sprint 3 (pipeline determinista ya construido). Sprint 2.2 mejora opcionalmente el
+Ranking Engine con `ai_profile` como signal adicional — no bloqueante.
+
+---
+
 ## Sprint 4 — Cierre del Flujo Operativo de Ventas (Epic: E6, E8, E14 v1)
 
 | Elemento a construir | Referencia |

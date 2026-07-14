@@ -20,6 +20,7 @@ from app.modules.conversation_ownership.api.webhook_router import router as webh
 from app.modules.conversation_ownership.application.decay import decay_inactive_conversations
 from app.modules.conversation_ownership.wiring import register_event_handlers
 from app.modules.intelligence_ai_admin.api.router import router as prompts_router
+from app.modules.lead_qualification.api.router import router as lead_qualification_router
 from app.modules.lead_qualification.wiring import (
     crm_sync_loop,
 )
@@ -79,6 +80,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(organizations_router, prefix="/api/v1")
 app.include_router(prompts_router, prefix="/api/v1")
 app.include_router(webhooks_router, prefix="/api/v1")
+app.include_router(lead_qualification_router, prefix="/api/v1")
 
 
 @app.get("/healthz", tags=["ops"])
