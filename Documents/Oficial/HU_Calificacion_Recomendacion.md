@@ -267,7 +267,7 @@ Scenario: Objeción de precio detectada
   Hot>=70, Warm 40-69.9, Cold<40 — ver design.md de `lead-objections-classification-us-209` para el
   detalle y las advertencias sobre el conflicto con `Lead.mark_synced()`).
 
-### AI-102 [GAP — no implementado] — Extraer señales libres de la conversación hacia `conversation_memory`
+### AI-102 [Implementado] — Extraer señales libres de la conversación hacia `conversation_memory`
 
 Como sistema quiero extraer del texto libre del lead (adjetivos de estilo, contexto familiar, tono)
 observaciones estructuradas con nivel de confianza, para tener materia prima con la que luego inferir su
@@ -285,12 +285,17 @@ Scenario: Lead menciona una preferencia de estilo no estructurada
 **Alineación**
 - (a) Transversal a Discovery — corre en paralelo a la captura de `PROFILE_DIMENSIONS`, no reemplaza a
   `BuyerProfileCaptureService`.
-- (b) Capa agentic: Requirement Extraction (`AI-102` en Backlog.md, solo título hasta ahora) —
-  Qualification Flow / LLM. Cero código.
+- (b) Capa agentic: Requirement Extraction (`AI-102` en Backlog.md) — implementada como extracción
+  determinista por palabras clave (`app/modules/conversation_memory/application/memory_extraction.py`),
+  no LLM; el extractor LLM+RAG sigue siendo diseño futuro (ver design.md de
+  `conversation-memory-extraction-ai-102`).
 - (c) Tabla nueva `conversation_memory` (id, conversation_id, lead_id, memory_type, entity_name, value
-  jsonb, confidence, created_at) — ya propuesta en `AI_Recommendation_Domain_Model.md`, no existe en
-  Supabase.
-- (d) [GAP] No implementado. Bloquea a US-211.
+  jsonb, confidence, created_at) — migración `0008_sprint2_1_conversation_memory`, esquema idéntico al
+  propuesto en `AI_Recommendation_Domain_Model.md`.
+- (d) Implementado (`MemoryType.STYLE_PREFERENCE`, `MemoryType.FAMILY_CONTEXT`; `MemoryType.TONE` queda
+  como valor de enum sin extractor todavía). Sigue bloqueando a US-211 (inferencia de perfil de
+  afinidad), que permanece fuera de este scope (sub-sprint 2.2) — este cambio solo escribe la tabla,
+  nada la consume aún.
 
 ### US-211 [GAP — no implementado] — Agregar `conversation_memory` en `ai_profile` y `buyer_persona`
 
@@ -563,7 +568,7 @@ Scenario: Router clasifica intención y delega
 | US-207 | Sync Opportunity Stage=Qualified | Opportunity FSM (paralela) | Servicio determinista (ACL) | leads, crm_access_audit, crm_sync_cursors | Sí |
 | US-208 | Ampliar a 7 dimensiones (financing_type, decision_maker_mode) | Discovery (QUALIFICATION) | Qualification Flow (extractor `extract_financing_and_decision_mode` — buyer-profile-dimensions-us-208) | buyer_profiles | Sí |
 | US-209 | Hot/Warm/Cold + objeciones | Transversal | Qualification Flow extractor + LeadScoringService (determinista; Objection Handler LLM+RAG sigue en diseño) | lead_objections, leads (lead_classification) | Sí |
-| AI-102 | Extraer señales libres a conversation_memory | Transversal (Discovery) | Requirement Extraction (diseño) | conversation_memory (nueva) | No [GAP] |
+| AI-102 | Extraer señales libres a conversation_memory | Transversal (Discovery) | Requirement Extraction (extractor determinista, `conversation_memory` module — conversation-memory-extraction-ai-102) | conversation_memory (nueva) | Sí |
 | US-211 | Agregar ai_profile / buyer_persona | Transversal | Sin dueño claro (diseño) | buyer_profiles.ai_profile, leads.buyer_persona (nuevas) | No [GAP] |
 | US-302 | Ingestion de propiedades | Soporte previo a Recommendation | Matching Engine | properties, property_embeddings | Sí |
 | US-303 | Filtro estructurado en SQL | Recommendation (RECOMMENDATION) | Matching Engine (SQL filters) | properties | Parcial |
