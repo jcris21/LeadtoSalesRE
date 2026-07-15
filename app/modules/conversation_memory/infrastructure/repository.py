@@ -39,12 +39,17 @@ class ConversationMemoryRepository:
             )
         )
 
-    async def list_for_lead(self, lead_id: uuid.UUID) -> list[ConversationMemoryObservation]:
-        result = await self._session.execute(
+    async def list_for_lead(
+        self, lead_id: uuid.UUID, *, min_confidence: float | None = None
+    ) -> list[ConversationMemoryObservation]:
+        query = (
             select(ConversationMemoryORM)
             .where(ConversationMemoryORM.lead_id == lead_id)
             .order_by(ConversationMemoryORM.created_at)
         )
+        if min_confidence is not None:
+            query = query.where(ConversationMemoryORM.confidence >= min_confidence)
+        result = await self._session.execute(query)
         return [self._to_domain(row) for row in result.scalars().all()]
 
     async def list_for_conversation(

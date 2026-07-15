@@ -87,6 +87,14 @@ class LeadRepository:
         row.contact_reference = lead.contact_reference
         row.synced_at = lead.synced_at
 
+    async def set_buyer_persona(self, lead_id: uuid.UUID, snapshot: dict) -> None:
+        """US-211: writes the persona snapshot column only — deliberately not
+        part of `save()` so the aggregator stays the sole writer and lead-sync
+        can never clobber it."""
+        row = await self._session.get(LeadORM, lead_id)
+        if row is not None:
+            row.buyer_persona = snapshot
+
     @staticmethod
     def _to_row(lead: Lead) -> LeadORM:
         return LeadORM(
@@ -149,6 +157,20 @@ class BuyerProfileRepository:
             profile.decision_maker_mode.value if profile.decision_maker_mode else None
         )
         row.updated_at = profile.updated_at
+
+    async def set_ai_profile(self, lead_id: uuid.UUID, snapshot: dict) -> bool:
+        """US-211: writes the affinity snapshot column only — deliberately not
+        part of `save()` so profile capture can never clobber it. Returns
+        False when the lead has no profile row yet (aggregator degrades
+        gracefully instead of creating one)."""
+        result = await self._session.execute(
+            select(BuyerProfileORM).where(BuyerProfileORM.lead_id == lead_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.ai_profile = snapshot
+        return True
 
     @staticmethod
     def _to_domain(row: BuyerProfileORM) -> BuyerProfile:

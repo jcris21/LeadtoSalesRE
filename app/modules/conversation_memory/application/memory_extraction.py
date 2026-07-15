@@ -53,14 +53,52 @@ _STYLE_KEYWORDS: tuple[str, ...] = (
     "contemporanea",
 )
 
-_FAMILY_CONTEXT_KEYWORDS: tuple[str, ...] = (
+#: Phrases that indicate the absence of children. Checked before the
+#: presence phrases so that "no tenemos hijos" is never also counted as a
+#: "tenemos hijos" match (see `_find_family_context_keywords`).
+_FAMILY_NO_CHILDREN_KEYWORDS: tuple[str, ...] = (
+    "no tenemos hijos",
+    "no tengo hijos",
+    "sin hijos",
+    "somos una pareja sin hijos",
+)
+
+_FAMILY_CHILDREN_PRESENCE_KEYWORDS: tuple[str, ...] = (
     "tenemos hijos",
+    "tenemos hijas",
     "tenemos ninos",
     "tenemos niños",
+    "tenemos ninas",
+    "tenemos niñas",
+    "tengo hijos",
+    "tengo hijas",
+    "tengo un hijo",
+    "tengo una hija",
+)
+
+_FAMILY_SOLO_KEYWORDS: tuple[str, ...] = (
     "vivimos solos",
-    "somos una pareja sin hijos",
+    "vivimos solas",
+    "vivo solo",
+    "vivo sola",
+)
+
+_FAMILY_PET_KEYWORDS: tuple[str, ...] = (
     "tenemos mascota",
+    "tenemos mascotas",
     "tenemos una mascota",
+    "tengo mascota",
+    "tengo una mascota",
+)
+
+#: Flat union kept for compatibility with anything iterating "all family
+#: context keywords" — extraction itself uses the four typed tuples above
+#: via `_find_family_context_keywords`.
+_FAMILY_CONTEXT_KEYWORDS: tuple[str, ...] = (
+    _FAMILY_NO_CHILDREN_KEYWORDS
+    + _FAMILY_CHILDREN_PRESENCE_KEYWORDS
+    + _FAMILY_SOLO_KEYWORDS
+    + _FAMILY_PET_KEYWORDS
 )
 
 
@@ -88,7 +126,26 @@ def _find_style_keywords(normalized_text: str) -> tuple[str, ...]:
 
 
 def _find_family_context_keywords(normalized_text: str) -> tuple[str, ...]:
-    return tuple(kw for kw in _FAMILY_CONTEXT_KEYWORDS if _normalize(kw) in normalized_text)
+    """Substring match against the four family-context keyword tuples.
+
+    Negative phrases ("no tenemos hijos") are checked first; any children-
+    presence phrase that is itself a substring of an already-matched
+    negative phrase is dropped, so "no tenemos hijos" is never also reported
+    as a "tenemos hijos" (positive) match.
+    """
+    negative_matches = tuple(
+        kw for kw in _FAMILY_NO_CHILDREN_KEYWORDS if _normalize(kw) in normalized_text
+    )
+    negative_normalized = tuple(_normalize(kw) for kw in negative_matches)
+    presence_matches = tuple(
+        kw
+        for kw in _FAMILY_CHILDREN_PRESENCE_KEYWORDS
+        if _normalize(kw) in normalized_text
+        and not any(_normalize(kw) in neg for neg in negative_normalized)
+    )
+    solo_matches = tuple(kw for kw in _FAMILY_SOLO_KEYWORDS if _normalize(kw) in normalized_text)
+    pet_matches = tuple(kw for kw in _FAMILY_PET_KEYWORDS if _normalize(kw) in normalized_text)
+    return negative_matches + presence_matches + solo_matches + pet_matches
 
 
 async def extract_conversation_memory(

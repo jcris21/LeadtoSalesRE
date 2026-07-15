@@ -293,11 +293,11 @@ Scenario: Lead menciona una preferencia de estilo no estructurada
   jsonb, confidence, created_at) — migración `0008_sprint2_1_conversation_memory`, esquema idéntico al
   propuesto en `AI_Recommendation_Domain_Model.md`.
 - (d) Implementado (`MemoryType.STYLE_PREFERENCE`, `MemoryType.FAMILY_CONTEXT`; `MemoryType.TONE` queda
-  como valor de enum sin extractor todavía). Sigue bloqueando a US-211 (inferencia de perfil de
-  afinidad), que permanece fuera de este scope (sub-sprint 2.2) — este cambio solo escribe la tabla,
-  nada la consume aún.
+  como valor de enum sin extractor todavía). US-211 (sub-sprint 2.2, affinity-profile-aggregation-us-211)
+  ya consume esta tabla: `ProfileAggregationService` sintetiza las observaciones en
+  `buyer_profiles.ai_profile` y `leads.buyer_persona`.
 
-### US-211 [GAP — no implementado] — Agregar `conversation_memory` en `ai_profile` y `buyer_persona`
+### US-211 — Agregar `conversation_memory` en `ai_profile` y `buyer_persona`
 
 Como sistema quiero sintetizar las observaciones acumuladas en `conversation_memory` en dos snapshots
 distintos — `ai_profile` (por requirement/buyer profile, para scoring del Ranking Engine) y
@@ -317,12 +317,14 @@ Scenario: Suficientes observaciones acumuladas
 **Alineación**
 - (a) Transversal — alimenta Recommendation (RECOMMENDATION) vía Ranking Engine, y toda la Conversation
   FSM vía tono del Coordinator.
-- (b) Capa agentic: sin dueño claro en Agentic_System.md hoy — encajaría como paso de síntesis dentro de
-  Qualification Flow o como servicio propio; cero código.
-- (c) Requiere columnas nuevas: `buyer_profiles.ai_profile` jsonb y `leads.buyer_persona` jsonb (ninguna
-  existe hoy en Supabase ni en el ORM).
-- (d) [GAP] No implementado. Depende de AI-102. Bloquea a que US-305 (Ranking) use una señal de afinidad
-  real en vez de solo budget/zona/tipo.
+- (b) Capa agentic: servicio propio de síntesis — `ProfileAggregationService`
+  (`conversation_memory/application/profile_aggregation.py`, affinity-profile-aggregation-us-211),
+  invocado por el caller tras una extracción AI-102 no vacía (nunca en el camino de búsqueda).
+- (c) Implementado: columnas `buyer_profiles.ai_profile` jsonb y `leads.buyer_persona` jsonb —
+  migración `0009_sprint2_2_affinity_profile`.
+- (d) Implementado (agregación determinista por frecuencia de keywords, umbral `confidence >= 0.5`;
+  scoring LLM queda como iteración futura, misma postura que AI-102). Desbloquea a US-305 (Ranking)
+  para usar `ai_profile` como señal de afinidad real — el wiring en el Ranking Engine es scope de US-305.
 
 ---
 
@@ -569,7 +571,7 @@ Scenario: Router clasifica intención y delega
 | US-208 | Ampliar a 7 dimensiones (financing_type, decision_maker_mode) | Discovery (QUALIFICATION) | Qualification Flow (extractor `extract_financing_and_decision_mode` — buyer-profile-dimensions-us-208) | buyer_profiles | Sí |
 | US-209 | Hot/Warm/Cold + objeciones | Transversal | Qualification Flow extractor + LeadScoringService (determinista; Objection Handler LLM+RAG sigue en diseño) | lead_objections, leads (lead_classification) | Sí |
 | AI-102 | Extraer señales libres a conversation_memory | Transversal (Discovery) | Requirement Extraction (extractor determinista, `conversation_memory` module — conversation-memory-extraction-ai-102) | conversation_memory (nueva) | Sí |
-| US-211 | Agregar ai_profile / buyer_persona | Transversal | Sin dueño claro (diseño) | buyer_profiles.ai_profile, leads.buyer_persona (nuevas) | No [GAP] |
+| US-211 | Agregar ai_profile / buyer_persona | Transversal | Síntesis determinista (`ProfileAggregationService`, `conversation_memory` module — affinity-profile-aggregation-us-211) | buyer_profiles.ai_profile, leads.buyer_persona (nuevas) | Sí |
 | US-302 | Ingestion de propiedades | Soporte previo a Recommendation | Matching Engine | properties, property_embeddings | Sí |
 | US-303 | Filtro estructurado en SQL | Recommendation (RECOMMENDATION) | Matching Engine (SQL filters) | properties | Parcial |
 | US-304 | Retrieval semántico pgvector | Recommendation (RECOMMENDATION) | Matching Engine (pgvector) | property_embeddings | Parcial |

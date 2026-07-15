@@ -100,6 +100,43 @@ async def test_message_with_both_signals_inserts_two_rows(
     assert types == {MemoryType.STYLE_PREFERENCE, MemoryType.FAMILY_CONTEXT}
 
 
+async def test_negated_family_phrase_does_not_report_positive_match(
+    session_factory, seeded_lead_and_conversation, org_id
+):
+    """"no tenemos hijos" must not also surface as a "tenemos hijos" (positive)
+    match — substring collision fixed by checking negative phrases first."""
+    lead_id, conversation_id = seeded_lead_and_conversation
+    async with session_factory() as session:
+        result = await extract_conversation_memory(
+            session,
+            conversation_id=conversation_id,
+            lead_id=lead_id,
+            organization_id=org_id,
+            text="No tenemos hijos, somos una pareja joven",
+        )
+        await session.commit()
+    assert len(result) == 1
+    assert result[0].memory_type is MemoryType.FAMILY_CONTEXT
+    assert result[0].value["phrases"] == ["no tenemos hijos"]
+
+
+async def test_family_context_singular_and_feminine_variants_match(
+    session_factory, seeded_lead_and_conversation, org_id
+):
+    lead_id, conversation_id = seeded_lead_and_conversation
+    async with session_factory() as session:
+        result = await extract_conversation_memory(
+            session,
+            conversation_id=conversation_id,
+            lead_id=lead_id,
+            organization_id=org_id,
+            text="Tengo una hija y vivo sola",
+        )
+        await session.commit()
+    assert len(result) == 1
+    assert set(result[0].value["phrases"]) == {"tengo una hija", "vivo sola"}
+
+
 async def test_no_signal_inserts_nothing(session_factory, seeded_lead_and_conversation, org_id):
     lead_id, conversation_id = seeded_lead_and_conversation
     async with session_factory() as session:

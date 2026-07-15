@@ -43,6 +43,10 @@ class LeadORM(Base):
     #: Chatwoot — the sole key a Conversation can use to resolve its Lead
     #: without either system inventing an id the other doesn't know (Sprint 3).
     contact_reference: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    #: US-211 persona snapshot (family_stage/has_pets/communication), written
+    #: solely by ProfileAggregationService — never mirrored from wacrm, so
+    #: CON-2 (wacrm as SoR) is unaffected, same precedent as lead_score.
+    buyer_persona: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
@@ -75,6 +79,10 @@ class BuyerProfileORM(Base):
     #: the purchase decision.
     financing_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decision_maker_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: US-211 affinity snapshot (modern_score/family_score/confidence),
+    #: derived from conversation_memory by ProfileAggregationService — never
+    #: written by BuyerProfileCaptureService nor read by completeness().
+    ai_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
