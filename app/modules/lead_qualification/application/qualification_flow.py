@@ -28,6 +28,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.lead_qualification.application.lead_scoring import LeadScoringService
 from app.modules.lead_qualification.application.lead_sync import LeadNotFoundError
 from app.modules.lead_qualification.application.profile_capture import (
     BuyerProfileCaptureService,
@@ -36,6 +37,7 @@ from app.modules.lead_qualification.domain.models import (
     DecisionMakerMode,
     FinancingType,
     MoneyRange,
+    ObjectionType,
     ProfilePatch,
     ProfileValidationError,
     PropertyType,
@@ -44,6 +46,10 @@ from app.modules.lead_qualification.domain.models import (
 from app.modules.lead_qualification.infrastructure.repository import LeadRepository
 
 ExtractionResult = ProfilePatch | str | None
+#: US-209: objection detection is not a `BuyerProfile` dimension, so it does
+#: not go through `ProfilePatch` — the result is the matched `ObjectionType`
+#: (already persisted via `LeadScoringService.record_objection`) or `None`.
+ObjectionExtractionResult = ObjectionType | None
 
 _REPROMPT_BUDGET = (
     "No pude entender tu presupuesto. ¿Podrías indicarme un rango o monto aproximado?"
@@ -132,6 +138,30 @@ _DECISION_MODE_KEYWORDS: tuple[tuple[str, DecisionMakerMode], ...] = (
     ("decido solo", DecisionMakerMode.SOLO),
     ("decido sola", DecisionMakerMode.SOLO),
     ("solo yo decido", DecisionMakerMode.SOLO),
+)
+
+_OBJECTION_KEYWORDS: tuple[tuple[str, ObjectionType], ...] = (
+    ("muy caro", ObjectionType.PRECIO),
+    ("carisimo", ObjectionType.PRECIO),
+    ("no tengo presupuesto para", ObjectionType.PRECIO),
+    ("se me va del presupuesto", ObjectionType.PRECIO),
+    ("no me alcanza", ObjectionType.PRECIO),
+    ("no me gusta la zona", ObjectionType.ZONA),
+    ("esa zona no", ObjectionType.ZONA),
+    ("muy lejos", ObjectionType.ZONA),
+    ("zona insegura", ObjectionType.ZONA),
+    ("no califico", ObjectionType.FINANCIAMIENTO),
+    ("no me aprueban", ObjectionType.FINANCIAMIENTO),
+    ("problema con el banco", ObjectionType.FINANCIAMIENTO),
+    ("no tengo para la cuota inicial", ObjectionType.FINANCIAMIENTO),
+    ("muy pequeño", ObjectionType.TAMANO),
+    ("muy chico", ObjectionType.TAMANO),
+    ("necesito mas espacio", ObjectionType.TAMANO),
+    ("muy grande para lo que busco", ObjectionType.TAMANO),
+    ("aun no es el momento", ObjectionType.TIEMPO),
+    ("no tengo apuro", ObjectionType.TIEMPO),
+    ("mas adelante", ObjectionType.TIEMPO),
+    ("todavia lo estoy pensando", ObjectionType.TIEMPO),
 )
 
 _MUST_HAVE_MARKERS = (
@@ -362,3 +392,38 @@ async def extract_financing_and_decision_mode(
     service = BuyerProfileCaptureService(session)
     await service.update_profile(lead_id, patch)
     return patch
+
+
+def _extract_objection_type(normalized_text: str) -> ObjectionType | None:
+    for keyword, objection_type in _OBJECTION_KEYWORDS:
+        if _normalize(keyword) in normalized_text:
+            return objection_type
+    return None
+
+
+async def extract_objection(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    text: str,
+) -> ObjectionExtractionResult:
+    """US-209: single best-match objection detection (closed-enum, keyword
+    first, mirrors `extract_property_type`). Persists via
+    `LeadScoringService.record_objection`, which also recomputes
+    `Lead.lead_score`/`lead_classification` — not a `BuyerProfile` dimension,
+    so `BuyerProfileCaptureService` is not involved here."""
+    normalized = _normalize(text)
+    objection_type = _extract_objection_type(normalized)
+    if objection_type is None:
+        return None
+
+    await _assert_tenant(session, lead_id, organization_id)
+    service = LeadScoringService(session)
+    await service.record_objection(
+        lead_id,
+        organization_id=organization_id,
+        objection_type=objection_type,
+        raw_text=text,
+    )
+    return objection_type

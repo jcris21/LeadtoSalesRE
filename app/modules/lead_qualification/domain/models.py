@@ -202,6 +202,48 @@ class BuyerProfile(Entity):
         return 100.0 * len(self.captured_dimensions()) / len(PROFILE_DIMENSIONS)
 
 
+class ObjectionType(StrEnum):
+    """One of the five sales-objection categories the AI Agent tracks
+    (US-209)."""
+
+    PRECIO = "precio"
+    ZONA = "zona"
+    FINANCIAMIENTO = "financiamiento"
+    TAMANO = "tamano"
+    TIEMPO = "tiempo"
+
+
+class LeadClassification(StrEnum):
+    """Hot/Warm/Cold commercial-priority classification derived from
+    `Lead.lead_score` (US-209)."""
+
+    HOT = "hot"
+    WARM = "warm"
+    COLD = "cold"
+
+
+class Objection(Entity):
+    """One detected sales objection, append-only (a lead can raise the same
+    `ObjectionType` more than once — each occurrence is its own row)."""
+
+    def __init__(
+        self,
+        *,
+        id: uuid.UUID | None = None,
+        lead_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        type: ObjectionType,
+        raw_text: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        self.id = id or new_id()
+        self.lead_id = lead_id
+        self.organization_id = organization_id
+        self.type = type
+        self.raw_text = raw_text
+        self.created_at = created_at or utcnow()
+
+
 @dataclass(frozen=True)
 class CRMStageSynced(DomainEvent):
     """A lead's pipeline stage was synced from wacrm (§7.7). Consumed by the
@@ -224,6 +266,20 @@ class ProfileCompleted(DomainEvent):
     profile: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ObjectionRecorded(DomainEvent):
+    """An `Objection` was persisted and `Lead.lead_score`/`lead_classification`
+    were recomputed (US-209). No consumer wired yet — future: notify the
+    assigned broker on Hot->Cold transitions, or push classification to
+    wacrm."""
+
+    lead_id: str = ""
+    crm_lead_id: str = ""
+    objection_type: str = ""
+    lead_score: float = 0.0
+    lead_classification: str = ""
+
+
 class Lead(AggregateRoot):
     """Local mirror of the wacrm lead. Only the Lead Sync Adapter writes it;
     every other module reads through `LeadSyncPort.get_lead` (QA-08)."""
@@ -236,6 +292,7 @@ class Lead(AggregateRoot):
         crm_lead_id: str,
         pipeline_stage: PipelineStage = PipelineStage.NEW,
         lead_score: float = 0.0,
+        lead_classification: LeadClassification = LeadClassification.HOT,
         assigned_broker_id: uuid.UUID | None = None,
         contact_reference: str | None = None,
         synced_at: datetime | None = None,
@@ -247,6 +304,7 @@ class Lead(AggregateRoot):
         self.crm_lead_id = crm_lead_id
         self.pipeline_stage = pipeline_stage
         self.lead_score = lead_score
+        self.lead_classification = lead_classification
         self.assigned_broker_id = assigned_broker_id
         self.contact_reference = contact_reference
         self.synced_at = synced_at or utcnow()
@@ -257,6 +315,16 @@ class Lead(AggregateRoot):
         re-synced before any critical business decision."""
         reference = now or utcnow()
         return (reference - self.synced_at) > timedelta(seconds=threshold_seconds)
+
+    def apply_objection_scoring(
+        self, *, lead_score: float, lead_classification: LeadClassification
+    ) -> None:
+        """US-209: apply the locally-computed score/classification after an
+        Objection is recorded. Separate from `mark_synced` since this writer
+        is local, not a wacrm mirror update (see design.md Decision 3 and the
+        Risks section on the two-writer conflict)."""
+        self.lead_score = lead_score
+        self.lead_classification = lead_classification
 
     def mark_synced(
         self,

@@ -241,7 +241,7 @@ Scenario: Lead declara forma de pago
   (`budget, locations, property_type, timeline, must_haves, financing_type, decision_maker_mode`),
   extractor `extract_financing_and_decision_mode` en `qualification_flow.py`.
 
-### US-209 [GAP — no implementado] — Clasificación Hot/Warm/Cold y registro de objeciones
+### US-209 [Implementado] — Clasificación Hot/Warm/Cold y registro de objeciones
 
 Como AI Agent quiero clasificar al lead en Hot/Warm/Cold y registrar objeciones (Precio, Zona,
 Financiamiento, Tamaño, Tiempo) para priorizar el seguimiento comercial.
@@ -258,9 +258,14 @@ Scenario: Objeción de precio detectada
 **Alineación**
 - (a) No mapea a un estado FSM único; es transversal a Discovery/Recommendation.
 - (b) Capa agentic: Objection Handler (LLM+RAG) — solo diseño en Agentic_System.md, cero código.
-- (c) Tabla nueva propuesta: `lead_objections` (no existe en Supabase actual); `leads.lead_score` ya
-  existe.
-- (d) [GAP] No implementado. `Lead.lead_score` existe pero nada lo escribe desde objeciones.
+- (c) Tabla `lead_objections` (migración `0007_sprint2_1_lead_objections`); `leads.lead_classification`
+  agregado en la misma migración.
+- (d) Implementado (extracción determinista, sin LLM — el Objection Handler LLM+RAG sigue siendo
+  diseño futuro per (b)): `ObjectionType`, `LeadClassification`, `Objection`, extractor
+  `extract_objection`, `LeadScoringService.record_objection` recalcula `Lead.lead_score`/
+  `lead_classification` (fórmula: `100 - 15*tipos_distintos - 5*total_objeciones`, umbrales
+  Hot>=70, Warm 40-69.9, Cold<40 — ver design.md de `lead-objections-classification-us-209` para el
+  detalle y las advertencias sobre el conflicto con `Lead.mark_synced()`).
 
 ### AI-102 [GAP — no implementado] — Extraer señales libres de la conversación hacia `conversation_memory`
 
@@ -557,7 +562,7 @@ Scenario: Router clasifica intención y delega
 | US-206 | Completeness Gate | Discovery→Recommendation | Guardrail no-LLM | buyer_profiles, leads, outbox_events | Sí |
 | US-207 | Sync Opportunity Stage=Qualified | Opportunity FSM (paralela) | Servicio determinista (ACL) | leads, crm_access_audit, crm_sync_cursors | Sí |
 | US-208 | Ampliar a 7 dimensiones (financing_type, decision_maker_mode) | Discovery (QUALIFICATION) | Qualification Flow (extractor `extract_financing_and_decision_mode` — buyer-profile-dimensions-us-208) | buyer_profiles | Sí |
-| US-209 | Hot/Warm/Cold + objeciones | Transversal | Objection Handler (diseño) | lead_objections (nueva) | No [GAP] |
+| US-209 | Hot/Warm/Cold + objeciones | Transversal | Qualification Flow extractor + LeadScoringService (determinista; Objection Handler LLM+RAG sigue en diseño) | lead_objections, leads (lead_classification) | Sí |
 | AI-102 | Extraer señales libres a conversation_memory | Transversal (Discovery) | Requirement Extraction (diseño) | conversation_memory (nueva) | No [GAP] |
 | US-211 | Agregar ai_profile / buyer_persona | Transversal | Sin dueño claro (diseño) | buyer_profiles.ai_profile, leads.buyer_persona (nuevas) | No [GAP] |
 | US-302 | Ingestion de propiedades | Soporte previo a Recommendation | Matching Engine | properties, property_embeddings | Sí |
