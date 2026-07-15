@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
+    DecisionMakerMode,
+    FinancingType,
     Lead,
     MoneyRange,
     PipelineStage,
@@ -135,6 +137,10 @@ class BuyerProfileRepository:
         row.property_type = profile.property_type.value if profile.property_type else None
         row.timeline = profile.timeline.value if profile.timeline else None
         row.must_haves = list(profile.must_haves)
+        row.financing_type = profile.financing_type.value if profile.financing_type else None
+        row.decision_maker_mode = (
+            profile.decision_maker_mode.value if profile.decision_maker_mode else None
+        )
         row.updated_at = profile.updated_at
 
     @staticmethod
@@ -150,6 +156,10 @@ class BuyerProfileRepository:
             property_type=PropertyType(row.property_type) if row.property_type else None,
             timeline=Timeline(row.timeline) if row.timeline else None,
             must_haves=tuple(row.must_haves or ()),
+            financing_type=FinancingType(row.financing_type) if row.financing_type else None,
+            decision_maker_mode=(
+                DecisionMakerMode(row.decision_maker_mode) if row.decision_maker_mode else None
+            ),
             updated_at=row.updated_at,
         )
 

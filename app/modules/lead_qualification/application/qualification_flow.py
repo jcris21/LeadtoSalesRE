@@ -33,6 +33,8 @@ from app.modules.lead_qualification.application.profile_capture import (
     BuyerProfileCaptureService,
 )
 from app.modules.lead_qualification.domain.models import (
+    DecisionMakerMode,
+    FinancingType,
     MoneyRange,
     ProfilePatch,
     ProfileValidationError,
@@ -99,6 +101,37 @@ _TIMELINE_KEYWORDS: tuple[tuple[str, Timeline], ...] = (
     ("solo viendo", Timeline.EXPLORING),
     ("sin apuro", Timeline.EXPLORING),
     ("explorando opciones", Timeline.EXPLORING),
+)
+
+_FINANCING_KEYWORDS: tuple[tuple[str, FinancingType], ...] = (
+    ("credito hipotecario aprobado", FinancingType.MORTGAGE_APPROVED),
+    ("credito preaprobado", FinancingType.MORTGAGE_PREAPPROVED),
+    ("credito pre-aprobado", FinancingType.MORTGAGE_PREAPPROVED),
+    ("credito ya aprobado", FinancingType.MORTGAGE_APPROVED),
+    ("hipoteca aprobada", FinancingType.MORTGAGE_APPROVED),
+    ("credito hipotecario", FinancingType.MORTGAGE_APPROVED),
+    ("evaluando financiamiento", FinancingType.EVALUATING),
+    ("evaluando credito", FinancingType.EVALUATING),
+    ("estoy evaluando como financiar", FinancingType.EVALUATING),
+    ("al contado", FinancingType.CASH),
+    ("de contado", FinancingType.CASH),
+    ("pago en efectivo", FinancingType.CASH),
+    ("contado", FinancingType.CASH),
+)
+
+_DECISION_MODE_KEYWORDS: tuple[tuple[str, DecisionMakerMode], ...] = (
+    ("con mi esposa", DecisionMakerMode.COUPLE),
+    ("con mi esposo", DecisionMakerMode.COUPLE),
+    ("con mi pareja", DecisionMakerMode.COUPLE),
+    ("en pareja", DecisionMakerMode.COUPLE),
+    ("con mi familia", DecisionMakerMode.FAMILY),
+    ("decision familiar", DecisionMakerMode.FAMILY),
+    ("toda la familia", DecisionMakerMode.FAMILY),
+    ("yo solo", DecisionMakerMode.SOLO),
+    ("yo sola", DecisionMakerMode.SOLO),
+    ("decido solo", DecisionMakerMode.SOLO),
+    ("decido sola", DecisionMakerMode.SOLO),
+    ("solo yo decido", DecisionMakerMode.SOLO),
 )
 
 _MUST_HAVE_MARKERS = (
@@ -281,6 +314,48 @@ async def extract_timeline_and_must_haves(
     await _assert_tenant(session, lead_id, organization_id)
     try:
         patch = ProfilePatch(timeline=timeline, must_haves=must_haves)
+    except ProfileValidationError:
+        return None  # unreachable: both fields are None or non-empty here
+
+    service = BuyerProfileCaptureService(session)
+    await service.update_profile(lead_id, patch)
+    return patch
+
+
+def _extract_financing(normalized_text: str) -> FinancingType | None:
+    for keyword, financing_type in _FINANCING_KEYWORDS:
+        if _normalize(keyword) in normalized_text:
+            return financing_type
+    return None
+
+
+def _extract_decision_mode(normalized_text: str) -> DecisionMakerMode | None:
+    for keyword, decision_mode in _DECISION_MODE_KEYWORDS:
+        if _normalize(keyword) in normalized_text:
+            return decision_mode
+    return None
+
+
+async def extract_financing_and_decision_mode(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    text: str,
+) -> ExtractionResult:
+    """US-208: financing type and/or decision-maker mode, both may be present
+    in the same message and land in a single `ProfilePatch`."""
+    normalized = _normalize(text)
+    financing_type = _extract_financing(normalized)
+    decision_maker_mode = _extract_decision_mode(normalized)
+    if financing_type is None and decision_maker_mode is None:
+        return None
+
+    await _assert_tenant(session, lead_id, organization_id)
+    try:
+        patch = ProfilePatch(
+            financing_type=financing_type, decision_maker_mode=decision_maker_mode
+        )
     except ProfileValidationError:
         return None  # unreachable: both fields are None or non-empty here
 

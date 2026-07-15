@@ -218,7 +218,7 @@ Scenario: ProfileCompleted dispara sync a CRM
 - (c) `leads` (pipeline_stage), `crm_access_audit`, `crm_sync_cursors`.
 - (d) Implementado: `LeadSyncAdapter.push_profile_update`, `Lead.mark_synced()` → `CRMStageSynced`.
 
-### US-208 [GAP — no implementado] — Ampliar perfil a las 6 dimensiones del Customer Journey
+### US-208 [Implementado] — Ampliar perfil a las 6 dimensiones del Customer Journey
 
 Como Product Owner quiero que `BuyerProfile` capture financiamiento y modo de decisión (solo/pareja/
 familia) para cerrar la brecha entre el Customer Journey documentado y el modelo de dominio actual.
@@ -235,9 +235,11 @@ Scenario: Lead declara forma de pago
 **Alineación**
 - (a) Discovery (QUALIFICATION).
 - (b) Qualification Flow — diseño únicamente.
-- (c) `buyer_profiles` (requiere migración: columnas `financing_type`, `decision_maker_mode`).
-- (d) [GAP] No existe en código; `PROFILE_DIMENSIONS = (budget, locations, property_type, timeline,
-  must_haves)`.
+- (c) `buyer_profiles` (migración `0006_sprint2_1_buyer_profile_dimensions`: columnas `financing_type`,
+  `decision_maker_mode`).
+- (d) Implementado: `FinancingType`, `DecisionMakerMode`, `PROFILE_DIMENSIONS` ahora tiene 7 elementos
+  (`budget, locations, property_type, timeline, must_haves, financing_type, decision_maker_mode`),
+  extractor `extract_financing_and_decision_mode` en `qualification_flow.py`.
 
 ### US-209 [GAP — no implementado] — Clasificación Hot/Warm/Cold y registro de objeciones
 
@@ -554,7 +556,7 @@ Scenario: Router clasifica intención y delega
 | US-205 | Capturar timeline y must-haves | Discovery (QUALIFICATION) | Qualification Flow (extractor + endpoint, sin enrutamiento conversacional — qualification-dimensions-us-202-205) | buyer_profiles | Parcial |
 | US-206 | Completeness Gate | Discovery→Recommendation | Guardrail no-LLM | buyer_profiles, leads, outbox_events | Sí |
 | US-207 | Sync Opportunity Stage=Qualified | Opportunity FSM (paralela) | Servicio determinista (ACL) | leads, crm_access_audit, crm_sync_cursors | Sí |
-| US-208 | Ampliar a 6 dimensiones | Discovery (QUALIFICATION) | Qualification Flow (diseño) | buyer_profiles | No [GAP] |
+| US-208 | Ampliar a 7 dimensiones (financing_type, decision_maker_mode) | Discovery (QUALIFICATION) | Qualification Flow (extractor `extract_financing_and_decision_mode` — buyer-profile-dimensions-us-208) | buyer_profiles | Sí |
 | US-209 | Hot/Warm/Cold + objeciones | Transversal | Objection Handler (diseño) | lead_objections (nueva) | No [GAP] |
 | AI-102 | Extraer señales libres a conversation_memory | Transversal (Discovery) | Requirement Extraction (diseño) | conversation_memory (nueva) | No [GAP] |
 | US-211 | Agregar ai_profile / buyer_persona | Transversal | Sin dueño claro (diseño) | buyer_profiles.ai_profile, leads.buyer_persona (nuevas) | No [GAP] |

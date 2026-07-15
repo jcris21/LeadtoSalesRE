@@ -69,6 +69,10 @@ class BuyerProfileORM(Base):
     property_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     timeline: Mapped[str | None] = mapped_column(String(32), nullable=True)
     must_haves: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    #: US-208 dimensions: how the buyer plans to pay and who is involved in
+    #: the purchase decision.
+    financing_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decision_maker_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

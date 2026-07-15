@@ -14,6 +14,8 @@ from app.modules.conversation_ownership.infrastructure.db_models import Conversa
 from app.modules.conversation_ownership.infrastructure.repository import ConversationRepository
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
+    DecisionMakerMode,
+    FinancingType,
     Lead,
     MoneyRange,
     PropertyType,
@@ -69,6 +71,8 @@ async def complete_profile(session_factory, seeded_org, seeded_lead):
         property_type=PropertyType.APARTMENT,
         timeline=Timeline.IMMEDIATE,
         must_haves=("balcony",),
+        financing_type=FinancingType.CASH,
+        decision_maker_mode=DecisionMakerMode.SOLO,
     )
     async with session_factory() as session:
         await BuyerProfileRepository(session).save(seeded_org, profile)
