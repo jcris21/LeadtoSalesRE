@@ -52,21 +52,26 @@
 
 ## 5. Backend: Manual Endpoint Testing with curl (MANDATORY - AGENT MUST EXECUTE)
 
-- [x] 5.1 Ensure the backend server is running (start if needed) — **BLOCKED**: see report below
-- [ ] 5.2 Test each of the 5 POST endpoints with curl: valid payload (verify 200 + completeness/
-      captured_dimensions), invalid payload (verify 422), non-existent lead (verify 404)
-- [ ] 5.3 For each successful POST, restore database state afterward (delete/revert the persisted
-      dimension value)
+- [x] 5.1 Ensure the backend server is running (start if needed) — resolved (see
+      `reports/2026-07-15-step-5-curl-endpoint-verification.md`): the venv's Python interpreter had a
+      broken OpenSSL (`OPENSSL_Uplink` crash on any TLS connection); rebuilding `.venv` against a
+      working local Python 3.12 interpreter fixed it and the server started against the real DB
+- [x] 5.2 Test each of the 5 POST endpoints with curl: valid payload (verify 200 + completeness/
+      captured_dimensions), invalid payload (verify 422), non-existent lead (verify 404) — all 15
+      checks passed, see report
+- [x] 5.3 For each successful POST, restore database state afterward (delete/revert the persisted
+      dimension value) — temporary organization/lead/buyer_profile rows deleted after the run
 - [x] 5.4 Document all curl commands and responses in
-      `openspec/changes/qualification-dimensions-us-202-205/reports/2026-07-13-step-5-curl-endpoint-verification.md`
-      (documents the environment blocker instead — see report)
-- [ ] 5.5 Verify database state matches pre-test state after cleanup — N/A, no writes occurred (see
-      report)
+      `openspec/changes/qualification-dimensions-us-202-205/reports/2026-07-15-step-5-curl-endpoint-verification.md`
+- [x] 5.5 Verify database state matches pre-test state after cleanup — confirmed 0 rows remaining
+      for the temp organization/lead/buyer_profile ids (see report)
 
 ## 6. Update Technical Documentation (MANDATORY)
 
 - [x] 6.1 Update `Documents/Oficial/HU_Calificacion_Recomendacion.md` rows for US-202–US-205: rows
-      stay "Parcial" (conversational entry point not verified — Step 5 blocked in this environment,
-      see report); each row's Alineación (b) now names the concrete extractor/endpoint implemented
+      stay "Parcial" — Step 5 (curl verification) is now done (2026-07-15), but per design.md's own
+      scope note, "Implementado" requires AI-104 (Coordinator Agent) to route real conversation turns
+      into `qualification_flow.py`'s extractors, which remains a separate, not-yet-started change;
+      each row's Alineación (b) names the concrete extractor/endpoint implemented
 - [x] 6.2 Cross-reference this change and `openspec/specs/lead-qualification/us-202-205-enrichment.md`
       from the updated HU rows
