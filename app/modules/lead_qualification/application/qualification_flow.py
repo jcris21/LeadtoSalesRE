@@ -28,12 +28,16 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.lead_qualification.application.lead_scoring import LeadScoringService
 from app.modules.lead_qualification.application.lead_sync import LeadNotFoundError
 from app.modules.lead_qualification.application.profile_capture import (
     BuyerProfileCaptureService,
 )
 from app.modules.lead_qualification.domain.models import (
+    DecisionMakerMode,
+    FinancingType,
     MoneyRange,
+    ObjectionType,
     ProfilePatch,
     ProfileValidationError,
     PropertyType,
@@ -42,6 +46,10 @@ from app.modules.lead_qualification.domain.models import (
 from app.modules.lead_qualification.infrastructure.repository import LeadRepository
 
 ExtractionResult = ProfilePatch | str | None
+#: US-209: objection detection is not a `BuyerProfile` dimension, so it does
+#: not go through `ProfilePatch` — the result is the matched `ObjectionType`
+#: (already persisted via `LeadScoringService.record_objection`) or `None`.
+ObjectionExtractionResult = ObjectionType | None
 
 _REPROMPT_BUDGET = (
     "No pude entender tu presupuesto. ¿Podrías indicarme un rango o monto aproximado?"
@@ -99,6 +107,61 @@ _TIMELINE_KEYWORDS: tuple[tuple[str, Timeline], ...] = (
     ("solo viendo", Timeline.EXPLORING),
     ("sin apuro", Timeline.EXPLORING),
     ("explorando opciones", Timeline.EXPLORING),
+)
+
+_FINANCING_KEYWORDS: tuple[tuple[str, FinancingType], ...] = (
+    ("credito hipotecario aprobado", FinancingType.MORTGAGE_APPROVED),
+    ("credito preaprobado", FinancingType.MORTGAGE_PREAPPROVED),
+    ("credito pre-aprobado", FinancingType.MORTGAGE_PREAPPROVED),
+    ("credito ya aprobado", FinancingType.MORTGAGE_APPROVED),
+    ("hipoteca aprobada", FinancingType.MORTGAGE_APPROVED),
+    ("credito hipotecario", FinancingType.MORTGAGE_APPROVED),
+    ("evaluando financiamiento", FinancingType.EVALUATING),
+    ("evaluando credito", FinancingType.EVALUATING),
+    ("estoy evaluando como financiar", FinancingType.EVALUATING),
+    ("al contado", FinancingType.CASH),
+    ("de contado", FinancingType.CASH),
+    ("pago en efectivo", FinancingType.CASH),
+    ("contado", FinancingType.CASH),
+)
+
+_DECISION_MODE_KEYWORDS: tuple[tuple[str, DecisionMakerMode], ...] = (
+    ("con mi esposa", DecisionMakerMode.COUPLE),
+    ("con mi esposo", DecisionMakerMode.COUPLE),
+    ("con mi pareja", DecisionMakerMode.COUPLE),
+    ("en pareja", DecisionMakerMode.COUPLE),
+    ("con mi familia", DecisionMakerMode.FAMILY),
+    ("decision familiar", DecisionMakerMode.FAMILY),
+    ("toda la familia", DecisionMakerMode.FAMILY),
+    ("yo solo", DecisionMakerMode.SOLO),
+    ("yo sola", DecisionMakerMode.SOLO),
+    ("decido solo", DecisionMakerMode.SOLO),
+    ("decido sola", DecisionMakerMode.SOLO),
+    ("solo yo decido", DecisionMakerMode.SOLO),
+)
+
+_OBJECTION_KEYWORDS: tuple[tuple[str, ObjectionType], ...] = (
+    ("muy caro", ObjectionType.PRECIO),
+    ("carisimo", ObjectionType.PRECIO),
+    ("no tengo presupuesto para", ObjectionType.PRECIO),
+    ("se me va del presupuesto", ObjectionType.PRECIO),
+    ("no me alcanza", ObjectionType.PRECIO),
+    ("no me gusta la zona", ObjectionType.ZONA),
+    ("esa zona no", ObjectionType.ZONA),
+    ("muy lejos", ObjectionType.ZONA),
+    ("zona insegura", ObjectionType.ZONA),
+    ("no califico", ObjectionType.FINANCIAMIENTO),
+    ("no me aprueban", ObjectionType.FINANCIAMIENTO),
+    ("problema con el banco", ObjectionType.FINANCIAMIENTO),
+    ("no tengo para la cuota inicial", ObjectionType.FINANCIAMIENTO),
+    ("muy pequeño", ObjectionType.TAMANO),
+    ("muy chico", ObjectionType.TAMANO),
+    ("necesito mas espacio", ObjectionType.TAMANO),
+    ("muy grande para lo que busco", ObjectionType.TAMANO),
+    ("aun no es el momento", ObjectionType.TIEMPO),
+    ("no tengo apuro", ObjectionType.TIEMPO),
+    ("mas adelante", ObjectionType.TIEMPO),
+    ("todavia lo estoy pensando", ObjectionType.TIEMPO),
 )
 
 _MUST_HAVE_MARKERS = (
@@ -287,3 +350,80 @@ async def extract_timeline_and_must_haves(
     service = BuyerProfileCaptureService(session)
     await service.update_profile(lead_id, patch)
     return patch
+
+
+def _extract_financing(normalized_text: str) -> FinancingType | None:
+    for keyword, financing_type in _FINANCING_KEYWORDS:
+        if _normalize(keyword) in normalized_text:
+            return financing_type
+    return None
+
+
+def _extract_decision_mode(normalized_text: str) -> DecisionMakerMode | None:
+    for keyword, decision_mode in _DECISION_MODE_KEYWORDS:
+        if _normalize(keyword) in normalized_text:
+            return decision_mode
+    return None
+
+
+async def extract_financing_and_decision_mode(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    text: str,
+) -> ExtractionResult:
+    """US-208: financing type and/or decision-maker mode, both may be present
+    in the same message and land in a single `ProfilePatch`."""
+    normalized = _normalize(text)
+    financing_type = _extract_financing(normalized)
+    decision_maker_mode = _extract_decision_mode(normalized)
+    if financing_type is None and decision_maker_mode is None:
+        return None
+
+    await _assert_tenant(session, lead_id, organization_id)
+    try:
+        patch = ProfilePatch(
+            financing_type=financing_type, decision_maker_mode=decision_maker_mode
+        )
+    except ProfileValidationError:
+        return None  # unreachable: both fields are None or non-empty here
+
+    service = BuyerProfileCaptureService(session)
+    await service.update_profile(lead_id, patch)
+    return patch
+
+
+def _extract_objection_type(normalized_text: str) -> ObjectionType | None:
+    for keyword, objection_type in _OBJECTION_KEYWORDS:
+        if _normalize(keyword) in normalized_text:
+            return objection_type
+    return None
+
+
+async def extract_objection(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    text: str,
+) -> ObjectionExtractionResult:
+    """US-209: single best-match objection detection (closed-enum, keyword
+    first, mirrors `extract_property_type`). Persists via
+    `LeadScoringService.record_objection`, which also recomputes
+    `Lead.lead_score`/`lead_classification` — not a `BuyerProfile` dimension,
+    so `BuyerProfileCaptureService` is not involved here."""
+    normalized = _normalize(text)
+    objection_type = _extract_objection_type(normalized)
+    if objection_type is None:
+        return None
+
+    await _assert_tenant(session, lead_id, organization_id)
+    service = LeadScoringService(session)
+    await service.record_objection(
+        lead_id,
+        organization_id=organization_id,
+        objection_type=objection_type,
+        raw_text=text,
+    )
+    return objection_type

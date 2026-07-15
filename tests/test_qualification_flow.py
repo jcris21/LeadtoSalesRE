@@ -10,11 +10,14 @@ from app.modules.lead_qualification.application.profile_capture import (
 )
 from app.modules.lead_qualification.application.qualification_flow import (
     extract_budget,
+    extract_financing_and_decision_mode,
     extract_locations,
     extract_property_type,
     extract_timeline_and_must_haves,
 )
 from app.modules.lead_qualification.domain.models import (
+    DecisionMakerMode,
+    FinancingType,
     Lead,
     MoneyRange,
     ProfilePatch,
@@ -197,6 +200,85 @@ async def test_none_field_never_erases_previously_captured_value(
         profile = await BuyerProfileRepository(session).get_by_lead_id(seeded_lead)
     assert profile.locations == ("Surco",)
     assert profile.timeline is not None
+
+
+# --- financing_type / decision_maker_mode (US-208) ---------------------
+
+
+async def test_extract_financing_and_decision_mode_both_in_one_message(
+    session_factory, seeded_lead, org_id
+):
+    async with session_factory() as session:
+        result = await extract_financing_and_decision_mode(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Vamos a comprar en pareja, con crédito hipotecario",
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.financing_type is FinancingType.MORTGAGE_APPROVED
+    assert result.decision_maker_mode is DecisionMakerMode.COUPLE
+
+    async with session_factory() as session:
+        profile = await BuyerProfileRepository(session).get_by_lead_id(seeded_lead)
+    assert "financing_type" in profile.captured_dimensions()
+    assert "decision_maker_mode" in profile.captured_dimensions()
+
+
+async def test_extract_financing_cash_only(session_factory, seeded_lead, org_id):
+    async with session_factory() as session:
+        result = await extract_financing_and_decision_mode(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Voy a pagar al contado",
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.financing_type is FinancingType.CASH
+    assert result.decision_maker_mode is None
+
+
+async def test_extract_decision_mode_solo_only(session_factory, seeded_lead, org_id):
+    async with session_factory() as session:
+        result = await extract_financing_and_decision_mode(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Decido solo, sin nadie más",
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.decision_maker_mode is DecisionMakerMode.SOLO
+    assert result.financing_type is None
+
+
+async def test_extract_financing_and_decision_mode_no_signal(
+    session_factory, seeded_lead, org_id
+):
+    async with session_factory() as session:
+        result = await extract_financing_and_decision_mode(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Hola, buenas tardes",
+        )
+    assert result is None
+
+
+async def test_financing_and_decision_mode_cross_tenant_extraction_is_rejected(
+    session_factory, seeded_lead
+):
+    other_org_id = new_id()
+    async with session_factory() as session:
+        with pytest.raises(LeadNotFoundError):
+            await extract_financing_and_decision_mode(
+                session,
+                lead_id=seeded_lead,
+                organization_id=other_org_id,
+                text="Voy a pagar al contado",
+            )
 
 
 # --- tenant isolation ----------------------------------------------------

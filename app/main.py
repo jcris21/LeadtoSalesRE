@@ -16,6 +16,9 @@ from fastapi import FastAPI
 from app.core.config import get_settings
 from app.core.organization_context import OrganizationContextMiddleware
 from app.modules.auth.router import router as auth_router
+from app.modules.conversation_memory.infrastructure import (
+    db_models as conversation_memory_db_models,  # noqa: F401  (registers ORM on Base.metadata; no API router yet — AI-102)
+)
 from app.modules.conversation_ownership.api.webhook_router import router as webhooks_router
 from app.modules.conversation_ownership.application.decay import decay_inactive_conversations
 from app.modules.conversation_ownership.wiring import register_event_handlers

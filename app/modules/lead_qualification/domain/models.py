@@ -52,13 +52,35 @@ class PropertyType(StrEnum):
     OTHER = "other"
 
 
-#: The five dimensions progressive profiling must fill (Architecture.md §6.2).
+class FinancingType(StrEnum):
+    """How the buyer intends to pay — one of the seven profile dimensions
+    (US-208)."""
+
+    CASH = "cash"
+    MORTGAGE_APPROVED = "mortgage_approved"
+    MORTGAGE_PREAPPROVED = "mortgage_preapproved"
+    EVALUATING = "evaluating"
+
+
+class DecisionMakerMode(StrEnum):
+    """Who is involved in the purchase decision — one of the seven profile
+    dimensions (US-208)."""
+
+    SOLO = "solo"
+    COUPLE = "couple"
+    FAMILY = "family"
+
+
+#: The seven dimensions progressive profiling must fill (Architecture.md §6.2,
+#: extended by US-208 with financing_type and decision_maker_mode).
 PROFILE_DIMENSIONS: tuple[str, ...] = (
     "budget",
     "locations",
     "property_type",
     "timeline",
     "must_haves",
+    "financing_type",
+    "decision_maker_mode",
 )
 
 
@@ -92,6 +114,8 @@ class ProfilePatch(ValueObject):
     property_type: PropertyType | None = None
     timeline: Timeline | None = None
     must_haves: tuple[str, ...] | None = None
+    financing_type: FinancingType | None = None
+    decision_maker_mode: DecisionMakerMode | None = None
 
     def __post_init__(self) -> None:
         if self.locations is not None and not self.locations:
@@ -119,6 +143,8 @@ class BuyerProfile(Entity):
         property_type: PropertyType | None = None,
         timeline: Timeline | None = None,
         must_haves: tuple[str, ...] = (),
+        financing_type: FinancingType | None = None,
+        decision_maker_mode: DecisionMakerMode | None = None,
         updated_at: datetime | None = None,
     ) -> None:
         self.id = id or new_id()
@@ -128,6 +154,8 @@ class BuyerProfile(Entity):
         self.property_type = property_type
         self.timeline = timeline
         self.must_haves = must_haves
+        self.financing_type = financing_type
+        self.decision_maker_mode = decision_maker_mode
         self.updated_at = updated_at or utcnow()
 
     def apply(self, patch: ProfilePatch) -> None:
@@ -141,6 +169,10 @@ class BuyerProfile(Entity):
             self.timeline = patch.timeline
         if patch.must_haves is not None:
             self.must_haves = tuple(patch.must_haves)
+        if patch.financing_type is not None:
+            self.financing_type = patch.financing_type
+        if patch.decision_maker_mode is not None:
+            self.decision_maker_mode = patch.decision_maker_mode
         self.updated_at = utcnow()
 
     def captured_dimensions(self) -> tuple[str, ...]:
@@ -155,6 +187,10 @@ class BuyerProfile(Entity):
             captured.append("timeline")
         if self.must_haves:
             captured.append("must_haves")
+        if self.financing_type is not None:
+            captured.append("financing_type")
+        if self.decision_maker_mode is not None:
+            captured.append("decision_maker_mode")
         return tuple(captured)
 
     def missing_dimensions(self) -> tuple[str, ...]:
@@ -164,6 +200,48 @@ class BuyerProfile(Entity):
     def completeness(self) -> float:
         """Percent of required dimensions captured, 0.0–100.0."""
         return 100.0 * len(self.captured_dimensions()) / len(PROFILE_DIMENSIONS)
+
+
+class ObjectionType(StrEnum):
+    """One of the five sales-objection categories the AI Agent tracks
+    (US-209)."""
+
+    PRECIO = "precio"
+    ZONA = "zona"
+    FINANCIAMIENTO = "financiamiento"
+    TAMANO = "tamano"
+    TIEMPO = "tiempo"
+
+
+class LeadClassification(StrEnum):
+    """Hot/Warm/Cold commercial-priority classification derived from
+    `Lead.lead_score` (US-209)."""
+
+    HOT = "hot"
+    WARM = "warm"
+    COLD = "cold"
+
+
+class Objection(Entity):
+    """One detected sales objection, append-only (a lead can raise the same
+    `ObjectionType` more than once — each occurrence is its own row)."""
+
+    def __init__(
+        self,
+        *,
+        id: uuid.UUID | None = None,
+        lead_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        type: ObjectionType,
+        raw_text: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        self.id = id or new_id()
+        self.lead_id = lead_id
+        self.organization_id = organization_id
+        self.type = type
+        self.raw_text = raw_text
+        self.created_at = created_at or utcnow()
 
 
 @dataclass(frozen=True)
@@ -188,6 +266,20 @@ class ProfileCompleted(DomainEvent):
     profile: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ObjectionRecorded(DomainEvent):
+    """An `Objection` was persisted and `Lead.lead_score`/`lead_classification`
+    were recomputed (US-209). No consumer wired yet — future: notify the
+    assigned broker on Hot->Cold transitions, or push classification to
+    wacrm."""
+
+    lead_id: str = ""
+    crm_lead_id: str = ""
+    objection_type: str = ""
+    lead_score: float = 0.0
+    lead_classification: str = ""
+
+
 class Lead(AggregateRoot):
     """Local mirror of the wacrm lead. Only the Lead Sync Adapter writes it;
     every other module reads through `LeadSyncPort.get_lead` (QA-08)."""
@@ -200,6 +292,7 @@ class Lead(AggregateRoot):
         crm_lead_id: str,
         pipeline_stage: PipelineStage = PipelineStage.NEW,
         lead_score: float = 0.0,
+        lead_classification: LeadClassification = LeadClassification.HOT,
         assigned_broker_id: uuid.UUID | None = None,
         contact_reference: str | None = None,
         synced_at: datetime | None = None,
@@ -211,6 +304,7 @@ class Lead(AggregateRoot):
         self.crm_lead_id = crm_lead_id
         self.pipeline_stage = pipeline_stage
         self.lead_score = lead_score
+        self.lead_classification = lead_classification
         self.assigned_broker_id = assigned_broker_id
         self.contact_reference = contact_reference
         self.synced_at = synced_at or utcnow()
@@ -221,6 +315,16 @@ class Lead(AggregateRoot):
         re-synced before any critical business decision."""
         reference = now or utcnow()
         return (reference - self.synced_at) > timedelta(seconds=threshold_seconds)
+
+    def apply_objection_scoring(
+        self, *, lead_score: float, lead_classification: LeadClassification
+    ) -> None:
+        """US-209: apply the locally-computed score/classification after an
+        Objection is recorded. Separate from `mark_synced` since this writer
+        is local, not a wacrm mirror update (see design.md Decision 3 and the
+        Risks section on the two-writer conflict)."""
+        self.lead_score = lead_score
+        self.lead_classification = lead_classification
 
     def mark_synced(
         self,
