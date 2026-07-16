@@ -7,10 +7,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.lead_qualification.domain.models import PropertyType
+from app.modules.lead_qualification.domain.models import MoneyRange, PropertyType
 from app.modules.recommendation.domain.models import (
     NeighborhoodInsight,
     Property,
@@ -77,6 +77,57 @@ class PropertyRepository:
         result = await self._session.execute(
             select(PropertyORM).where(PropertyORM.organization_id == organization_id)
         )
+        return [self._to_domain(row) for row in result.scalars().all()]
+
+    async def filter_candidates(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        budget: MoneyRange | None,
+        zones: tuple[str, ...],
+        property_type: PropertyType | None,
+    ) -> list[Property]:
+        """US-303: hard-constraint filter pushed down to SQL WHERE — same
+        semantics as `Property.matches_hard_filters` (an absent constraint
+        adds no clause), always scoped by organization."""
+        query = select(PropertyORM).where(PropertyORM.organization_id == organization_id)
+        if budget is not None:
+            query = query.where(
+                PropertyORM.price >= budget.minimum, PropertyORM.price <= budget.maximum
+            )
+        if zones:
+            query = query.where(PropertyORM.zone.in_(zones))
+        if property_type is not None:
+            query = query.where(PropertyORM.property_type == property_type.value)
+        result = await self._session.execute(query)
+        return [self._to_domain(row) for row in result.scalars().all()]
+
+    async def semantic_search(
+        self,
+        *,
+        candidate_ids: list[uuid.UUID],
+        query_vector: tuple[float, ...],
+        top_n: int,
+    ) -> list[Property] | None:
+        """US-304: pgvector `<->` (cosine distance) ranking over the already
+        hard-filtered candidates. Returns None on dialects without pgvector
+        (e.g. the SQLite test harness) so the caller falls back to the
+        in-memory path — the service owns that decision (design D3/D4)."""
+        if self._session.bind.dialect.name != "postgresql" or not candidate_ids:
+            return None
+        vector_literal = "[" + ",".join(f"{v:.10f}" for v in query_vector) + "]"
+        query = (
+            select(PropertyORM)
+            .join(PropertyEmbeddingORM, PropertyEmbeddingORM.property_id == PropertyORM.id)
+            .where(PropertyORM.id.in_(candidate_ids))
+            .order_by(
+                text("property_embeddings.vector <-> CAST(:query_vector AS vector)").bindparams(
+                    query_vector=vector_literal
+                )
+            )
+            .limit(top_n)
+        )
+        result = await self._session.execute(query)
         return [self._to_domain(row) for row in result.scalars().all()]
 
     @staticmethod

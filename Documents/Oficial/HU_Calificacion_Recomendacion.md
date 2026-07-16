@@ -356,7 +356,7 @@ Scenario: Propiedad modificada en el inventario
 - (d) Implementado: `PropertyIngestionService.ingest_from_source`, `HashEmbeddingModel` (stand-in 16-dim,
   no modelo real — gap en US-308).
 
-### US-303 [GAP — parcial] — Filtrar candidatos duros por SQL en vez de Python
+### US-303 — Filtrar candidatos duros por SQL en vez de Python
 
 Como sistema quiero que el filtro estructurado (budget, zona, tipo) se ejecute como WHERE en SQL para
 evitar cargar toda la organización en memoria.
@@ -376,10 +376,12 @@ Scenario: Buscar candidatos dentro de presupuesto y zona
   diseño (filtra en Python).
 - (c) `properties` (requiere reconciliación de columnas: `zone` vs `District`/`name_address`, ver
   US-309).
-- (d) Implementado parcialmente: `StructuredFilterService.filter_candidates` +
-  `candidate.matches_hard_filters()` — [GAP] falta reescribir a SQL.
+- (d) Implementado (`PropertyRepository.filter_candidates` compone el WHERE en SQL — org + BETWEEN de
+  precio + `district IN` + tipo; `StructuredFilterService` delega y ya no carga el catálogo en Python;
+  `matches_hard_filters` queda como especificación ejecutable del dominio —
+  sprint-3-2-hybrid-retrieval-sql).
 
-### US-304 [GAP — parcial] — Migrar retrieval semántico a pgvector real
+### US-304 — Migrar retrieval semántico a pgvector real
 
 Como sistema quiero ejecutar la búsqueda por similitud usando el operador `<->` de pgvector en vez de
 cosine similarity en Python, para escalar más allá de catálogos pequeños.
@@ -399,8 +401,11 @@ Scenario: Buscar propiedades semánticamente similares al perfil
   usar.
 - (c) `property_embeddings` (columna `vector` es hoy `jsonb`, requiere migración a `vector(1536)` +
   índice HNSW — mismo gap ya identificado en `plan-implementacion-tablas-supabase.md`).
-- (d) Implementado parcialmente: `SemanticRetrievalService.retrieve` en Python puro — [GAP] falta
-  migración de esquema + query SQL.
+- (d) Implementado (`PropertyRepository.semantic_search` ordena por `<->` con `vector_cosine_ops` en
+  Postgres — cero cosine en Python en esa ruta; índice HNSW vía migración `0013`; en SQLite/tests se
+  conserva el fallback en memoria, mismo trade-off documentado del repo —
+  sprint-3-2-hybrid-retrieval-sql). La calidad del query embedding (`embed_query` real) queda como
+  mejora futura.
 
 ### US-305 — Rankear candidatos por señales ponderadas
 
@@ -581,8 +586,8 @@ Scenario: Router clasifica intención y delega
 | AI-102 | Extraer señales libres a conversation_memory | Transversal (Discovery) | Requirement Extraction (extractor determinista, `conversation_memory` module — conversation-memory-extraction-ai-102) | conversation_memory (nueva) | Sí |
 | US-211 | Agregar ai_profile / buyer_persona | Transversal | Síntesis determinista (`ProfileAggregationService`, `conversation_memory` module — affinity-profile-aggregation-us-211) | buyer_profiles.ai_profile, leads.buyer_persona (nuevas) | Sí |
 | US-302 | Ingestion de propiedades | Soporte previo a Recommendation | Matching Engine | properties, property_embeddings | Sí |
-| US-303 | Filtro estructurado en SQL | Recommendation (RECOMMENDATION) | Matching Engine (SQL filters) | properties | Parcial |
-| US-304 | Retrieval semántico pgvector | Recommendation (RECOMMENDATION) | Matching Engine (pgvector) | property_embeddings | Parcial |
+| US-303 | Filtro estructurado en SQL | Recommendation (RECOMMENDATION) | Matching Engine (SQL filters — `PropertyRepository.filter_candidates`, sprint-3-2-hybrid-retrieval-sql) | properties | Sí |
+| US-304 | Retrieval semántico pgvector | Recommendation (RECOMMENDATION) | Matching Engine (pgvector `<->` + HNSW, fallback en memoria solo en SQLite — sprint-3-2-hybrid-retrieval-sql) | property_embeddings | Sí |
 | US-305 | Ranking ponderado | Recommendation (RECOMMENDATION) | Matching Engine | — (en memoria) | Sí |
 | US-306 | Explicación en lenguaje natural | Recommendation (RECOMMENDATION) | Explanation (template, swap a LLM) | — (en memoria) | Sí |
 | US-307 | Enriquecimiento de vecindario | Recommendation (RECOMMENDATION) | Servicio determinista fan-out/fan-in | — (en memoria) | Parcial |

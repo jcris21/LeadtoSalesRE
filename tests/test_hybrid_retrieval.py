@@ -33,8 +33,25 @@ class FakePropertyStore:
         self._properties = properties or []
         self._embeddings = embeddings or {}
 
-    async def list_for_organization(self, organization_id: uuid.UUID) -> list[Property]:
-        return [p for p in self._properties if p.organization_id == organization_id]
+    async def filter_candidates(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        budget: MoneyRange | None,
+        zones: tuple[str, ...],
+        property_type: PropertyType | None,
+    ) -> list[Property]:
+        # In-memory mirror of PropertyRepository.filter_candidates' WHERE
+        # semantics (US-303); SQL parity is covered by the DB-backed suite in
+        # test_hybrid_retrieval_sql.py.
+        return [
+            p
+            for p in self._properties
+            if p.organization_id == organization_id
+            and p.matches_hard_filters(
+                budget=budget, zones=zones, property_type=property_type
+            )
+        ]
 
     async def get_embedding(self, property_id: uuid.UUID) -> PropertyEmbedding | None:
         return self._embeddings.get(property_id)
