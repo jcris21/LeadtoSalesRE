@@ -52,6 +52,9 @@ class Property(Entity):
         property_type: PropertyType,
         features: tuple[str, ...] = (),
         description: str = "",
+        name_address: str | None = None,
+        estado: str | None = None,
+        link_references: tuple[str, ...] = (),
         updated_at: datetime | None = None,
     ) -> None:
         self.id = id or new_id()
@@ -62,6 +65,12 @@ class Property(Entity):
         self.property_type = property_type
         self.features = features
         self.description = description
+        # US-309: fields formalized from the hand-edited Supabase schema.
+        # Deliberately NOT part of ingestion's `_content_key` — changing them
+        # must not invalidate stored embedding hashes (design.md D3).
+        self.name_address = name_address
+        self.estado = estado
+        self.link_references = link_references
         self.updated_at = updated_at or utcnow()
 
     def matches_hard_filters(
@@ -138,13 +147,16 @@ class NeighborhoodInsight(ValueObject):
 @dataclass(frozen=True)
 class RecommendationItem(ValueObject):
     """One Top-3 entry returned to the Coordinator: score, explanation, and
-    neighborhood data if it arrived within the enrichment timeout."""
+    neighborhood data if it arrived within the enrichment timeout. `signals`
+    (US-310) carries the exact RankingSignals that produced the score so
+    persistence can audit the ranking rationale."""
 
     property_id: uuid.UUID
     rank: int
     score: float
     explanation: str
     neighborhood: NeighborhoodInsight | None = None
+    signals: tuple[RankingSignal, ...] = ()
 
 
 @dataclass(frozen=True)

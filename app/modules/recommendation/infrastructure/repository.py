@@ -11,11 +11,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.lead_qualification.domain.models import PropertyType
-from app.modules.recommendation.domain.models import Property, PropertyEmbedding
+from app.modules.recommendation.domain.models import (
+    NeighborhoodInsight,
+    Property,
+    PropertyEmbedding,
+    RecommendationResult,
+)
 from app.modules.recommendation.infrastructure.db_models import (
     PropertyEmbeddingORM,
     PropertyORM,
+    RecommendationORM,
 )
+from app.shared.domain.base import new_id, utcnow
 
 
 def _ensure_utc(value):
@@ -40,6 +47,9 @@ class PropertyRepository:
         row.property_type = property.property_type.value
         row.features = list(property.features)
         row.description = property.description
+        row.name_address = property.name_address
+        row.estado = property.estado
+        row.link_references = list(property.link_references)
         row.updated_at = property.updated_at
 
     async def get_embedding(self, property_id: uuid.UUID) -> PropertyEmbedding | None:
@@ -80,6 +90,9 @@ class PropertyRepository:
             property_type=property.property_type.value,
             features=list(property.features),
             description=property.description,
+            name_address=property.name_address,
+            estado=property.estado,
+            link_references=list(property.link_references),
             updated_at=property.updated_at,
         )
 
@@ -94,6 +107,9 @@ class PropertyRepository:
             property_type=PropertyType(row.property_type),
             features=tuple(row.features or ()),
             description=row.description,
+            name_address=row.name_address,
+            estado=row.estado,
+            link_references=tuple(row.link_references or ()),
             updated_at=_ensure_utc(row.updated_at),
         )
 
@@ -105,3 +121,73 @@ class PropertyRepository:
             model_version=row.model_version,
             computed_at=_ensure_utc(row.computed_at),
         )
+
+
+def _neighborhood_snapshot(insight: NeighborhoodInsight | None) -> dict | None:
+    if insight is None:
+        return None
+    return {
+        "nearby_places": list(insight.nearby_places),
+        "partial": insight.partial,
+        "generated_at": insight.generated_at.isoformat(),
+    }
+
+
+class RecommendationRepository:
+    """US-310: audit-trail persistence for recommendation searches. Satisfies
+    `RecommendationService`'s structural `RecommendationStore` dependency."""
+
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def save_result(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        buyer_profile_id: uuid.UUID | None,
+        result: RecommendationResult,
+    ) -> None:
+        """One row per ranked item. `delivered_at` stays NULL here — delivery
+        is the caller's event (see `mark_delivered`)."""
+        for item in result.items:
+            self._session.add(
+                RecommendationORM(
+                    id=new_id(),
+                    organization_id=organization_id,
+                    lead_id=result.lead_id,
+                    buyer_profile_id=buyer_profile_id,
+                    property_id=item.property_id,
+                    rank=item.rank,
+                    score=item.score,
+                    signals=[
+                        {"name": s.name, "weight": s.weight, "value": s.value}
+                        for s in item.signals
+                    ],
+                    explanation=item.explanation,
+                    neighborhood=_neighborhood_snapshot(item.neighborhood),
+                    feedback=None,
+                    generated_at=result.generated_at,
+                    delivered_at=None,
+                )
+            )
+
+    async def mark_delivered(self, lead_id: uuid.UUID, generated_at) -> None:
+        """Stamps `delivered_at` on the rows of one search (lead + timestamp
+        identify the batch) after the message was actually published."""
+        result = await self._session.execute(
+            select(RecommendationORM).where(
+                RecommendationORM.lead_id == lead_id,
+                RecommendationORM.generated_at == generated_at,
+            )
+        )
+        now = utcnow()
+        for row in result.scalars().all():
+            row.delivered_at = now
+
+    async def list_for_lead(self, lead_id: uuid.UUID) -> list[RecommendationORM]:
+        result = await self._session.execute(
+            select(RecommendationORM)
+            .where(RecommendationORM.lead_id == lead_id)
+            .order_by(RecommendationORM.generated_at, RecommendationORM.rank)
+        )
+        return list(result.scalars().all())

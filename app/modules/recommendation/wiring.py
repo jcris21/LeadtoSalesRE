@@ -42,7 +42,10 @@ from app.modules.recommendation.application.retrieval import (
 )
 from app.modules.recommendation.domain.models import RecommendationResult
 from app.modules.recommendation.infrastructure.maps_client import GoogleMapsClient
-from app.modules.recommendation.infrastructure.repository import PropertyRepository
+from app.modules.recommendation.infrastructure.repository import (
+    PropertyRepository,
+    RecommendationRepository,
+)
 from app.shared.infrastructure import event_bus
 from app.shared.infrastructure.event_bus import EventBusWorker
 
@@ -95,6 +98,7 @@ async def handle_profile_completed(payload: dict) -> None:
     lead_id = uuid.UUID(fields["lead_id"])
 
     async with get_session_factory()() as session:
+        recommendation_store = RecommendationRepository(session)
         service = RecommendationService(
             buyer_profiles=BuyerProfileRepository(session),
             structured_filter=StructuredFilterService(PropertyRepository(session)),
@@ -104,6 +108,7 @@ async def handle_profile_completed(payload: dict) -> None:
             neighborhood_enrichment=_get_enrichment_adapter(),
             completeness_gate=CompletenessGate(),
             staleness_guard=StalenessGuard(session),
+            recommendation_store=recommendation_store,
         )
         try:
             result = await service.search(organization_id=organization_id, lead_id=lead_id)
@@ -167,6 +172,11 @@ async def handle_profile_completed(payload: dict) -> None:
                 )
             ],
         )
+        # US-310 delivery lifecycle: the Top-3 message is now queued on the
+        # outbox, so this search's audit rows count as delivered. A result
+        # with no items persisted nothing, so there is nothing to stamp.
+        if result.items:
+            await recommendation_store.mark_delivered(lead_id, result.generated_at)
         await session.commit()
 
 

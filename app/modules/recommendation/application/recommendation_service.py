@@ -60,6 +60,21 @@ class StalenessCheck(Protocol):
     async def check_before_decision(self, lead_id: uuid.UUID) -> object: ...
 
 
+class RecommendationStore(Protocol):
+    """US-310 audit persistence. Satisfied structurally by
+    `infrastructure.repository.RecommendationRepository`; optional so facade
+    unit tests need no DB. Persisting here (not in wiring) keeps the audit
+    trail complete for every future caller (Coordinator, Handoff Builder)."""
+
+    async def save_result(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        buyer_profile_id: uuid.UUID | None,
+        result: RecommendationResult,
+    ) -> None: ...
+
+
 class RecommendationService:
     """`RecommendationPort` implementation."""
 
@@ -74,6 +89,7 @@ class RecommendationService:
         neighborhood_enrichment: NeighborhoodEnrichmentPort,
         completeness_gate: CompletenessGate | None = None,
         staleness_guard: StalenessCheck | None = None,
+        recommendation_store: RecommendationStore | None = None,
         semantic_top_n: int | None = None,
         top_k: int | None = None,
         enrichment_timeout_ms: int | None = None,
@@ -87,6 +103,7 @@ class RecommendationService:
         self._neighborhood_enrichment = neighborhood_enrichment
         self._completeness_gate = completeness_gate or CompletenessGate()
         self._staleness_guard = staleness_guard
+        self._recommendation_store = recommendation_store
         self._semantic_top_n = semantic_top_n or settings.recommendation_semantic_top_n
         self._top_k = top_k or settings.recommendation_top_k
         self._enrichment_timeout_ms = (
@@ -153,9 +170,19 @@ class RecommendationService:
                 score=candidate.score,
                 explanation=explanation_text,
                 neighborhood=insights.get(candidate.property_id),
+                signals=candidate.signals,
             )
             for rank, (candidate, explanation_text) in enumerate(
                 zip(ranked, explanations, strict=True), start=1
             )
         )
-        return RecommendationResult(lead_id=lead_id, items=items)
+        result = RecommendationResult(lead_id=lead_id, items=items)
+        if self._recommendation_store is not None:
+            # US-310: audit trail — one row per ranked item, before returning,
+            # so every caller (wiring today, Coordinator later) is covered.
+            await self._recommendation_store.save_result(
+                organization_id=organization_id,
+                buyer_profile_id=buyer_profile.id,
+                result=result,
+            )
+        return result

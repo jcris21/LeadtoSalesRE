@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     recommendation_top_k: int = 3
     recommendation_enrichment_timeout_ms: int = 3000
 
+    # US-308: real embedding model (text-embedding-3-small, 1536 dims). When
+    # unset, ingestion falls back to the deterministic HashEmbeddingModel so
+    # tests and keyless dev environments make no network calls.
+    openai_api_key: str | None = None
+
     otel_service_name: str = "lead-to-sales-system"
     otel_exporter_otlp_endpoint: str | None = None
 

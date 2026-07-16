@@ -464,7 +464,7 @@ Scenario: Timeout parcial en la consulta externa
 - (d) Implementado: `NeighborhoodEnrichmentAdapter`, `GoogleMapsClient` — sin API key configurada
   (Sprint 3B), evento `NeighborhoodEnriched` ya modelado.
 
-### US-308 [GAP — no implementado] — Reemplazar embedding stand-in por modelo real
+### US-308 — Reemplazar embedding stand-in por modelo real
 
 Como sistema quiero usar un modelo de embeddings real (no `HashEmbeddingModel` de 16 dimensiones
 determinista) para que la similitud semántica sea significativa.
@@ -483,9 +483,12 @@ Scenario: Generar embedding real de una propiedad
 - (a) Soporte a Recommendation (RECOMMENDATION), previo al retrieval.
 - (b) Fuera del SAS, servicio de infraestructura.
 - (c) `property_embeddings`.
-- (d) [GAP] Hoy: `HashEmbeddingModel` (16-dim, stand-in). Bloquea a US-304.
+- (d) Implementado (`OpenAIEmbeddingModel`, `infrastructure/embedding_model.py` — seam async, selección
+  por `openai_api_key` con fallback determinista logueado; migración `0011` convierte
+  `property_embeddings.vector` a `vector(1536)`; sprint-3-1-recommendation-schema-persistence).
+  Desbloquea a US-304 (operador `<->`, Sprint 3.2).
 
-### US-309 [GAP — no implementado] — Reconciliar esquema de `properties`
+### US-309 — Reconciliar esquema de `properties`
 
 Como equipo de plataforma quiero que el ORM de `properties` refleje el esquema real de Supabase para
 eliminar el drift entre `zone` (esperado por el ORM) y `District`/`name_address`/`Link_references`/
@@ -504,10 +507,12 @@ Scenario: Migración Alembic alinea columnas
 - (a) Soporte transversal a Recommendation, bloquea US-303 (filtro SQL confiable).
 - (b) N/A (infraestructura de datos, no agentic).
 - (c) `properties`.
-- (d) [GAP] No implementado; mismo hallazgo que `Documents/Oficial/plan-implementacion-tablas-supabase.md`
-  (migración 0006, aún no escrita/aplicada).
+- (d) Implementado (migración `0010_sprint3_1_properties_reconciliation`, condicional al estado real de la
+  BD — cubre tanto la BD fresca de 0004 como el drift manual de Supabase; `PropertyORM.zone` mapea a la
+  columna snake_case `district`; `name_address`/`estado`/`link_references` jsonb formalizados en ORM y
+  dominio; sprint-3-1-recommendation-schema-persistence). Desbloquea a US-303.
 
-### US-310 [GAP — no implementado] — Persistir RecommendationResult en tabla `recommendations`
+### US-310 — Persistir RecommendationResult en tabla `recommendations`
 
 Como Product Owner quiero que cada resultado de búsqueda de recomendación se persista (candidatos,
 señales, explicación, vecindario, feedback) para poder auditar decisiones y alimentar el learning loop,
@@ -531,7 +536,10 @@ Scenario: Guardar sesión de recomendación
 - (c) Tabla nueva `recommendations` (id, organization_id, lead_id, buyer_profile_id, property_id, rank,
   score, signals jsonb, explanation, neighborhood jsonb, feedback jsonb, generated_at, delivered_at) con
   RLS — mismo diseño ya presentado en `plan-implementacion-tablas-supabase.md`.
-- (d) [GAP] `RecommendationService.search()` existe pero el `RecommendationResult` nunca se persiste hoy.
+- (d) Implementado (migración `0012_sprint3_1_recommendations` con RLS; `RecommendationService.search()`
+  persiste vía `RecommendationRepository` una fila por item con `signals` jsonb dinámico;
+  `wiring.handle_profile_completed` estampa `delivered_at` tras publicar `ResponseReady`; `feedback`
+  queda nullable para eventos futuros; sprint-3-1-recommendation-schema-persistence). Cierra US-301.
 
 ### AI-104 [GAP — no implementado] — Coordinator Agent y Intent Router LLM-backed
 
@@ -578,9 +586,9 @@ Scenario: Router clasifica intención y delega
 | US-305 | Ranking ponderado | Recommendation (RECOMMENDATION) | Matching Engine | — (en memoria) | Sí |
 | US-306 | Explicación en lenguaje natural | Recommendation (RECOMMENDATION) | Explanation (template, swap a LLM) | — (en memoria) | Sí |
 | US-307 | Enriquecimiento de vecindario | Recommendation (RECOMMENDATION) | Servicio determinista fan-out/fan-in | — (en memoria) | Parcial |
-| US-308 | Modelo de embeddings real | Soporte a Recommendation | Infraestructura | property_embeddings | No [GAP] |
-| US-309 | Reconciliar esquema properties | Soporte a Recommendation | N/A (datos) | properties | No [GAP] |
-| US-310 | Persistir recommendations | Recommendation (RECOMMENDATION) | Coordinator (orquesta, no existe aún) | recommendations (nueva) | No [GAP] |
+| US-308 | Modelo de embeddings real | Soporte a Recommendation | Infraestructura (`OpenAIEmbeddingModel`, seam async con fallback determinista) | property_embeddings | Sí |
+| US-309 | Reconciliar esquema properties | Soporte a Recommendation | N/A (datos — migración 0010 condicional) | properties | Sí |
+| US-310 | Persistir recommendations | Recommendation (RECOMMENDATION) | `RecommendationService` persiste; Coordinator (AI-104) heredará la orquestación | recommendations (nueva) | Sí |
 | AI-104 | Coordinator Agent + Intent Router | Transversal a toda la Conversation FSM | Coordinator/Intent Router (diseño) | ai_decision_traces, conversations | No [GAP] |
 
 ## Archivos de referencia (no se modifican, solo se citan como fuente)
