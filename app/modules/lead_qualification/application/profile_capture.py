@@ -89,4 +89,5 @@ class BuyerProfileCaptureService:
             "decision_maker_mode": (
                 profile.decision_maker_mode.value if profile.decision_maker_mode else None
             ),
+            "bedrooms": profile.bedrooms,
         }

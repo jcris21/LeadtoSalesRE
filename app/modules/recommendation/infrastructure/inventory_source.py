@@ -20,11 +20,14 @@ from app.shared.domain.base import utcnow
 _NAMESPACE = uuid.UUID("7c8f3e10-3b0a-4b8e-9f0d-6a2c1e5d4b3a")
 
 #: (external_id, price, zone, property_type, features, description)
+#: Zones must be Lima districts from qualification's _KNOWN_ZONES — the
+#: structured filter matches extracted locations verbatim against `zone`, so
+#: any zone outside that list yields 0 candidates (checklist G7).
 _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...] = (
     (
         "INV-001",
         135000.0,
-        "Palermo",
+        "Miraflores",
         PropertyType.APARTMENT,
         ("balcony", "pet_friendly", "elevator"),
         "Bright 2BR apartment two blocks from the park, recently renovated kitchen.",
@@ -32,7 +35,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-002",
         98000.0,
-        "Palermo",
+        "Miraflores",
         PropertyType.APARTMENT,
         ("pet_friendly",),
         "Cozy studio, ideal for a single professional, close to public transit.",
@@ -40,7 +43,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-003",
         320000.0,
-        "Recoleta",
+        "San Isidro",
         PropertyType.HOUSE,
         ("garden", "garage", "pool"),
         "Spacious family house with private garden and two-car garage.",
@@ -48,7 +51,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-004",
         275000.0,
-        "Recoleta",
+        "San Isidro",
         PropertyType.HOUSE,
         ("garage", "fireplace"),
         "Classic three-bedroom house near the cathedral, recently painted.",
@@ -56,7 +59,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-005",
         410000.0,
-        "Belgrano",
+        "Surco",
         PropertyType.APARTMENT,
         ("balcony", "gym", "concierge"),
         "Modern high-rise apartment with river view and building amenities.",
@@ -64,7 +67,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-006",
         150000.0,
-        "Belgrano",
+        "Surco",
         PropertyType.APARTMENT,
         ("elevator",),
         "Quiet 1BR apartment on a tree-lined street, natural light all day.",
@@ -72,7 +75,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-007",
         60000.0,
-        "Villa Crespo",
+        "Barranco",
         PropertyType.LAND,
         (),
         "Flat vacant lot zoned for residential construction.",
@@ -80,7 +83,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-008",
         890000.0,
-        "Belgrano",
+        "Surco",
         PropertyType.COMMERCIAL,
         ("storefront", "parking"),
         "Corner commercial space with street frontage, high foot traffic.",
@@ -88,7 +91,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-009",
         210000.0,
-        "Villa Crespo",
+        "Barranco",
         PropertyType.APARTMENT,
         ("balcony", "pet_friendly"),
         "3BR apartment near the design district, open floor plan.",
@@ -96,7 +99,7 @@ _CATALOG: tuple[tuple[str, float, str, PropertyType, tuple[str, ...], str], ...]
     (
         "INV-010",
         175000.0,
-        "Palermo",
+        "Miraflores",
         PropertyType.HOUSE,
         ("garden",),
         "Small house with a private backyard, walking distance to cafes.",

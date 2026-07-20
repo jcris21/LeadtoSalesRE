@@ -156,6 +156,7 @@ class BuyerProfileRepository:
         row.decision_maker_mode = (
             profile.decision_maker_mode.value if profile.decision_maker_mode else None
         )
+        row.bedrooms = profile.bedrooms
         row.updated_at = profile.updated_at
 
     async def set_ai_profile(self, lead_id: uuid.UUID, snapshot: dict) -> bool:
@@ -189,6 +190,7 @@ class BuyerProfileRepository:
             decision_maker_mode=(
                 DecisionMakerMode(row.decision_maker_mode) if row.decision_maker_mode else None
             ),
+            bedrooms=row.bedrooms,
             updated_at=row.updated_at,
         )
 

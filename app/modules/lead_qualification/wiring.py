@@ -29,7 +29,7 @@ from app.shared.infrastructure.event_bus import EventBusWorker
 logger = logging.getLogger(__name__)
 
 
-async def _build_wacrm_client(session, organization_id: uuid.UUID) -> WacrmClient:
+async def build_wacrm_client(session, organization_id: uuid.UUID) -> WacrmClient:
     """Per-organization client: orgs with a `CrmConfig` talk to their real wacrm
     instance with their own API key; orgs without one keep the legacy global
     `settings.wacrm_base_url` (the local mock) with no auth — no breaking
@@ -59,7 +59,7 @@ async def handle_profile_completed(payload: dict) -> None:
         if lead is None:
             logger.error("ProfileCompleted for unknown lead %s; dropping", lead_id)
             return
-        client = await _build_wacrm_client(session, lead.organization_id)
+        client = await build_wacrm_client(session, lead.organization_id)
         adapter = LeadSyncAdapter(session, client=client)
         try:
             await adapter.push_profile_update(lead_id, actor="system.event_bus")
@@ -95,7 +95,7 @@ async def sync_all_organizations_once() -> int:
     for organization_id in organization_ids:
         try:
             async with factory() as session:
-                client = await _build_wacrm_client(session, organization_id)
+                client = await build_wacrm_client(session, organization_id)
                 adapter = LeadSyncAdapter(session, client=client)
                 total += await adapter.poll_once(organization_id)
                 await session.commit()

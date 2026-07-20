@@ -71,8 +71,9 @@ class DecisionMakerMode(StrEnum):
     FAMILY = "family"
 
 
-#: The seven dimensions progressive profiling must fill (Architecture.md §6.2,
-#: extended by US-208 with financing_type and decision_maker_mode).
+#: The eight dimensions progressive profiling must fill (Architecture.md §6.2,
+#: extended by US-208 with financing_type and decision_maker_mode, and by the
+#: 2026-07-19 E2E review with bedrooms).
 PROFILE_DIMENSIONS: tuple[str, ...] = (
     "budget",
     "locations",
@@ -81,6 +82,7 @@ PROFILE_DIMENSIONS: tuple[str, ...] = (
     "must_haves",
     "financing_type",
     "decision_maker_mode",
+    "bedrooms",
 )
 
 
@@ -116,12 +118,15 @@ class ProfilePatch(ValueObject):
     must_haves: tuple[str, ...] | None = None
     financing_type: FinancingType | None = None
     decision_maker_mode: DecisionMakerMode | None = None
+    bedrooms: int | None = None
 
     def __post_init__(self) -> None:
         if self.locations is not None and not self.locations:
             raise ProfileValidationError("locations patch cannot be an empty list")
         if self.must_haves is not None and not self.must_haves:
             raise ProfileValidationError("must_haves patch cannot be an empty list")
+        if self.bedrooms is not None and not 1 <= self.bedrooms <= 15:
+            raise ProfileValidationError("bedrooms must be between 1 and 15")
 
     def is_empty(self) -> bool:
         return all(
@@ -145,6 +150,7 @@ class BuyerProfile(Entity):
         must_haves: tuple[str, ...] = (),
         financing_type: FinancingType | None = None,
         decision_maker_mode: DecisionMakerMode | None = None,
+        bedrooms: int | None = None,
         updated_at: datetime | None = None,
     ) -> None:
         self.id = id or new_id()
@@ -156,6 +162,7 @@ class BuyerProfile(Entity):
         self.must_haves = must_haves
         self.financing_type = financing_type
         self.decision_maker_mode = decision_maker_mode
+        self.bedrooms = bedrooms
         self.updated_at = updated_at or utcnow()
 
     def apply(self, patch: ProfilePatch) -> None:
@@ -173,6 +180,8 @@ class BuyerProfile(Entity):
             self.financing_type = patch.financing_type
         if patch.decision_maker_mode is not None:
             self.decision_maker_mode = patch.decision_maker_mode
+        if patch.bedrooms is not None:
+            self.bedrooms = patch.bedrooms
         self.updated_at = utcnow()
 
     def captured_dimensions(self) -> tuple[str, ...]:
@@ -191,6 +200,8 @@ class BuyerProfile(Entity):
             captured.append("financing_type")
         if self.decision_maker_mode is not None:
             captured.append("decision_maker_mode")
+        if self.bedrooms is not None:
+            captured.append("bedrooms")
         return tuple(captured)
 
     def missing_dimensions(self) -> tuple[str, ...]:

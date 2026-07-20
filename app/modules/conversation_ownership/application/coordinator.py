@@ -36,10 +36,26 @@ from app.modules.conversation_ownership.domain.models import (
     OwnerType,
     ResponseReady,
 )
+from app.modules.conversation_ownership.domain.prompts import DEFAULT_SYSTEM_PROMPT
 from app.modules.conversation_ownership.infrastructure.repository import (
     ConversationRepository,
     OwnershipDecisionRepository,
 )
+from app.modules.conversation_ownership.application.lead_linker import LeadLinker
+from app.modules.lead_qualification.application.identity_extraction import (
+    REPROMPT_IDENTITY,
+    extract_identity,
+)
+from app.modules.lead_qualification.application.lead_sync import LeadSyncAdapter
+from app.modules.lead_qualification.application.qualification_turn import (
+    QualificationTurnResult,
+    run_qualification_turn,
+)
+from app.modules.lead_qualification.infrastructure.generative_extractor import (
+    GenerativeExtractorPort,
+    get_default_generative_extractor,
+)
+from app.modules.lead_qualification.infrastructure.wacrm_client import WacrmClient
 from app.shared.infrastructure import event_bus
 from app.shared.infrastructure.observability import trace_decision
 
@@ -82,6 +98,8 @@ class CoordinatorAgent:
         guardrail: GuardrailInterceptor | None = None,
         policy_engine: OwnershipPolicyEngine | None = None,
         sidebar: SidebarPublisher | None = None,
+        generative_extractor: GenerativeExtractorPort | None = None,
+        wacrm_client: WacrmClient | None = None,
     ):
         from app.modules.conversation_ownership.application.langgraph_responder import (
             get_default_responder,
@@ -92,6 +110,8 @@ class CoordinatorAgent:
         self._guardrail = guardrail or GuardrailInterceptor()
         self._policy_engine = policy_engine or OwnershipPolicyEngine()
         self._sidebar = sidebar
+        self._generative_extractor = generative_extractor or get_default_generative_extractor()
+        self._wacrm_client = wacrm_client
         self._conversations = ConversationRepository(session)
         self._decisions = OwnershipDecisionRepository(session)
 
@@ -120,7 +140,25 @@ class CoordinatorAgent:
                     {"action": "guardrail_bypass", "explanation": decision.explanation}
                 )
             else:
-                response = await self._conversational_turn(conversation, text)
+                ask_identity, identity_consumed = await self._identity_gate(
+                    conversation, text, recorder
+                )
+                # A message consumed as identity (name/DNI) is not a
+                # qualification signal: the 8-digit DNI would reach the budget
+                # extractor and corrupt the profile. Qualification starts on
+                # the NEXT message.
+                qualification = (
+                    None
+                    if identity_consumed
+                    else await self._qualification_turn(conversation, text)
+                )
+                if qualification is not None:
+                    recorder.record_tool_call(
+                        "qualification.run_turn", {"text": text}, qualification.summary()
+                    )
+                response = await self._conversational_turn(
+                    conversation, text, qualification, ask_identity=ask_identity
+                )
                 recorder.set_output({"action": "reply", "response": response})
 
         await self._conversations.save(conversation)
@@ -159,7 +197,80 @@ class CoordinatorAgent:
         )
         return decision
 
-    async def _conversational_turn(self, conversation: Conversation, text: str) -> str:
+    async def _identity_gate(
+        self, conversation: Conversation, text: str, recorder
+    ) -> tuple[bool, bool]:
+        """G8: leads are born in the chat itself. While the conversation has no
+        linked Lead, the reply asks the contact for their name; the first
+        message carrying one creates the deal in wacrm (SoR) and mirrors it
+        locally in the same transaction — no waiting for the CDC poll, and no
+        new conversation state. Returns `(ask_identity, identity_consumed)`:
+        `ask_identity` when this turn's reply must (still) ask for identity,
+        `identity_consumed` when this message WAS the name/DNI answer — the
+        caller must then keep it away from the qualification extractors."""
+        if conversation.lead_id is not None or not conversation.contact_reference:
+            return False, False
+        # The lead may already exist (walk-in registered by a broker, or CDC
+        # landed since the webhook's own attempt) — link, never duplicate.
+        if await LeadLinker(self._session).link_if_possible(conversation) is not None:
+            return False, False
+        identity = extract_identity(text)
+        if identity is None:
+            return True, False
+        try:
+            client = self._wacrm_client or await self._build_wacrm_client(
+                conversation.organization_id
+            )
+            lead = await LeadSyncAdapter(self._session, client=client).create_lead(
+                conversation.organization_id,
+                contact_reference=conversation.contact_reference,
+                contact_name=identity.full_name,
+                dni=identity.dni,
+                actor=AGENT_NAME,
+            )
+        except Exception:  # noqa: BLE001 — a CRM outage must never kill the reply
+            logger.exception(
+                "wacrm lead creation failed for conversation %s; will retry next turn",
+                conversation.id,
+            )
+            return True, False
+        conversation.link_lead(lead.id)
+        recorder.record_tool_call(
+            "identity.create_lead",
+            {"text": text},
+            f"lead:{lead.crm_lead_id} name:{identity.full_name} dni:{identity.dni or '-'}",
+        )
+        return False, True
+
+    async def _build_wacrm_client(self, organization_id: uuid.UUID) -> WacrmClient:
+        from app.modules.lead_qualification.wiring import build_wacrm_client
+
+        return await build_wacrm_client(self._session, organization_id)
+
+    async def _qualification_turn(
+        self, conversation: Conversation, text: str
+    ) -> QualificationTurnResult | None:
+        """G1: the chat itself fills the BuyerProfile. Skipped while no Lead is
+        linked yet (wacrm CDC is eventually consistent, §7.7) — the
+        conversational reply still happens, and qualification resumes on the
+        first turn after `LeadLinker` resolves the link."""
+        if conversation.lead_id is None:
+            return None
+        return await run_qualification_turn(
+            self._session,
+            lead_id=conversation.lead_id,
+            organization_id=conversation.organization_id,
+            text=text,
+            generative_extractor=self._generative_extractor,
+        )
+
+    async def _conversational_turn(
+        self,
+        conversation: Conversation,
+        text: str,
+        qualification: QualificationTurnResult | None = None,
+        ask_identity: bool = False,
+    ) -> str:
         if conversation.state is ConversationState.NEW:
             decision = self._policy_engine.evaluate(OwnershipContext(conversation=conversation))
             await self._decisions.add(
@@ -193,6 +304,16 @@ class CoordinatorAgent:
         response = await self._responder.respond(
             system_prompt=system_prompt, conversation_id=conversation.id, text=text
         )
+        if qualification is not None and qualification.reprompts:
+            # An extractor saw a signal but couldn't validate it (e.g. a broken
+            # budget) — its re-prompt IS the right reply this turn. The
+            # responder still ran so the checkpointed history stays contiguous.
+            response = qualification.reprompts[0]
+        if ask_identity:
+            # G8 gate: no Lead linked yet — the reply asks for the contact's
+            # name (mutually exclusive with qualification re-prompts, which
+            # require a linked lead).
+            response = REPROMPT_IDENTITY
         conversation.record_event(
             ResponseReady(
                 organization_id=conversation.organization_id,
@@ -223,4 +344,4 @@ class CoordinatorAgent:
             AGENT_NAME,
             organization_id,
         )
-        return "Eres el asistente inmobiliario del equipo de asesores."
+        return DEFAULT_SYSTEM_PROMPT

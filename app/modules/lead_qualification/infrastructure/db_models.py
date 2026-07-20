@@ -12,7 +12,17 @@ goes through the Lead Sync Adapter and leaves a row here — allowed or denied.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, String, UniqueConstraint, Uuid
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -79,6 +89,7 @@ class BuyerProfileORM(Base):
     #: the purchase decision.
     financing_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decision_maker_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bedrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     #: US-211 affinity snapshot (modern_score/family_score/confidence),
     #: derived from conversation_memory by ProfileAggregationService — never
     #: written by BuyerProfileCaptureService nor read by completeness().

@@ -325,31 +325,137 @@ Cruce contra el catálogo de Historias de Usuario de `HU_Calificacion_Recomendac
 Qualification, Epic 3 — Recommendation Engine) y contra el esquema real de Supabase auditado en esta
 sesión (proyecto `bylyqznmjrqqjdfcshxj`).
 
+> **Actualizado 2026-07-17**: refleja el estado tras aplicar las migraciones Alembic 0006–0014
+> (Sprints 2.1, 2.2, 3.1 y 3.2). El esquema implementado de cada tabla de Epic 2/3 está en la sección
+> "Esquema implementado (Epic 2 y 3)" más abajo.
+
 | # | Tabla propuesta | Épica | Estado real | Detalle |
 |---|---|---|---|---|
 | 1 | `organization` | Transversal | ✅ Existe (`organizations`) | Usada tal cual, sin HU dedicada. |
-| 2 | `lead` | Epic 2 | ✅ Existe (`leads`), 🔴 falta `buyer_persona` | La tabla existe pero sin la columna `buyer_persona` jsonb del doc — es exactamente **US-211**. |
+| 2 | `lead` | Epic 2 | ✅ Existe (`leads`), completada | `buyer_persona` jsonb agregado por 0009 (**US-211 ✅**); además `lead_classification` Hot/Warm/Cold (0007, US-209) y `contact_reference` para el match Conversation↔Lead (0005). |
 | 3 | `conversation` | Transversal | ✅ Existe (`conversations`) | Usada por AI-104 (Coordinator, aún sin implementar). |
-| 4 | `conversation_memory` | Epic 2 | 🔴 Pendiente — no existe | Es **AI-102**: extracción de señales libres de la conversación. |
-| 5 | `requirement_profile` | Epic 2 | 🟡 Rol cubierto por `buyer_profiles` (existe) | **No se crea esta tabla** — decisión ya tomada: `buyer_profiles` cumple el mismo rol (budget/locations/property_type/timeline/must_haves). Diferencia real sin resolver: el doc permite múltiples perfiles por lead, `buyer_profiles.lead_id` es único (sin historial). El campo `ai_profile` de esta tabla sí es gap — **US-211**. |
+| 4 | `conversation_memory` | Epic 2 | ✅ Implementada (0008) | **AI-102 ✅** — mismo diseño del doc más `organization_id` (multi-tenant) e índices por org/lead/conversation/created_at. |
+| 5 | `requirement_profile` | Epic 2 | 🟡 Rol cubierto por `buyer_profiles` (existe) | **No se crea esta tabla** — `buyer_profiles` cumple el mismo rol, ahora con 7 dimensiones (0006 agregó `financing_type` y `decision_maker_mode`, US-208) y `ai_profile` jsonb (0009, **US-211 ✅**). Diferencia que persiste: el doc permite múltiples perfiles por lead, `buyer_profiles.lead_id` es único (sin historial). |
 | 6 | `building` | — | ⚪ Fuera de alcance | Ninguna HU de Epic 2/3 la cubre — pertenece al bounded context Inventory, no a Qualification/Recommendation. |
-| 7 | `property` | Epic 3 | 🟡 Existe (`properties`), con drift de esquema | Falta reconciliar `zone`↔`District`/`name_address`/`Link_references`/`estado` — **US-309**. No usa la taxonomía de 3 niveles category/type/subtype propuesta más abajo (queda como mejora futura). |
+| 7 | `property` | Epic 3 | ✅ Reconciliada (`properties`, 0010 + 0014) | **US-309 ✅** — 0010 convergió el drift (`District`→`district`, `Link_references` text→`link_references` jsonb, formaliza `name_address`/`estado`); 0014 convirtió `estado` de enum `estado_propiedad` a varchar(32). No usa la taxonomía de 3 niveles category/type/subtype propuesta más abajo (queda como mejora futura). |
 | 8 | `property_listing` | — | ⚪ Fuera de alcance | Ninguna HU separa precio/oferta comercial de `property`; `properties.price` vive directo en la tabla física. Rediseño mayor, no un gap de Epic 2/3. |
-| 9 | `recommendation` | Epic 3 | 🔴 Pendiente — no existe | Es **US-310**, con un diseño distinto al del doc: en vez de 5 columnas de score fijas (`hard_filter_score`/`semantic_score`/`location_score`/`price_score`/`lifestyle_score`), usa una columna `signals` jsonb con `RankingSignal[]` dinámico — refleja que `WeightedRankingEngine` ya en código no tiene un set fijo de 5 factores. Cierra también US-305, US-306, US-307. |
+| 9 | `recommendation` | Epic 3 | ✅ Implementada como `recommendations` (0012) | **US-310 ✅** — diseño distinto al del doc: en vez de 5 columnas de score fijas usa `signals` jsonb con `RankingSignal[]` dinámico (`WeightedRankingEngine` no tiene un set fijo de factores); FK directa a `properties` (no existe `property_listing`) y a `buyer_profiles`; `organization_id` con RLS. Cierra también US-301, US-305, US-306, US-307. |
 | 10 | `neighborhood` | — | ⚪ Fuera de alcance | El enriquecimiento (`US-307`) es una llamada en vivo a Google Maps, sin caché — cachearlo en esta tabla es una optimización futura, no un gap de Epic 2/3. |
 | 11 | `poi` | — | ⚪ Fuera de alcance | Mismo caso que `neighborhood`. |
 | 12 | `market_snapshot` | — | ⚪ Fuera de alcance | Ninguna HU de Epic 2/3 la requiere. |
 | 13 | `showing` | — | ⚪ Fuera de alcance | Pertenece a una épica posterior (Appointment/Scheduling, Epic 4 del Backlog), no a Qualification/Recommendation. |
 | 14 | `offer` | — | ⚪ Fuera de alcance | Épica posterior (Offer/Closing), no Epic 2/3. |
-| 15 | `embedding` (genérica, `entity_type`/`entity_id`) | Epic 3 | 🟡 Rol cubierto por `property_embeddings` (existe, tipo incorrecto) | **No se crea la tabla polimórfica** — el código ya modela embeddings 1:1 vía FK dedicada a `properties`, y no existe ningún dispatcher `entity_type` en ninguna parte del código. `property_embeddings.vector` sigue siendo `jsonb` en vez de `vector(1536)` real — **US-304 / US-308**. |
+| 15 | `embedding` (genérica, `entity_type`/`entity_id`) | Epic 3 | ✅ Rol cubierto por `property_embeddings` (completada) | **No se crea la tabla polimórfica** — el código modela embeddings 1:1 vía FK dedicada a `properties`. `vector` ya es `vector(1536)` real de pgvector (0011, modelo `text-embedding-3-small`) con índice HNSW `vector_cosine_ops` (0013) — **US-304 / US-308 ✅**. |
 
 ### Resumen de la comparación
 
-- **3 de 15 tablas ya existen y se usan tal cual**: `organization`→`organizations`, `conversation`→`conversations`, y `lead`→`leads` (parcial, falta `buyer_persona`).
-- **2 de 15 no se crean como tabla nueva porque su rol ya está cubierto** por una tabla existente con otro nombre/diseño: `requirement_profile`→`buyer_profiles`, `embedding`→`property_embeddings`.
-- **2 de 15 sí son gaps reales y accionables dentro de Epic 2/3**: `conversation_memory` (AI-102) y `recommendation`→`recommendations` (US-310), más `property` que existe pero necesita reconciliación (US-309).
-- **6 de 15 están fuera de alcance** de Epic 2/3 tal como está definido hoy: `building`, `property_listing`, `neighborhood`, `poi`, `market_snapshot`, `showing`, `offer` — pertenecen a otros bounded contexts (Inventory, Market Intelligence) o a épicas posteriores del Backlog (Appointment, Offer).
-- Es decir: de las 15 tablas del modelo de dominio, solo **2 nuevas tablas** (`conversation_memory`, `recommendations`) y **2 migraciones sobre tablas existentes** (`properties`, `property_embeddings`) son necesarias para cerrar Epic 2 y Epic 3 — el resto ya existe con otro nombre o es trabajo de otra épica.
+- **Todos los gaps accionables de Epic 2/3 están cerrados** con las migraciones 0006–0014: `conversation_memory` (0008, AI-102), `recommendations` (0012, US-310), reconciliación de `properties` (0010 + 0014, US-309) y conversión de `property_embeddings.vector` a `vector(1536)` con índice HNSW (0011 + 0013, US-304/US-308).
+- **4 de 15 tablas existen y se usan tal cual**: `organization`→`organizations`, `conversation`→`conversations`, `lead`→`leads` (con `buyer_persona`, `lead_classification` y `contact_reference` agregados) y `conversation_memory`.
+- **2 de 15 no se crean como tabla nueva porque su rol ya está cubierto** por una tabla existente con otro nombre/diseño: `requirement_profile`→`buyer_profiles` (7 dimensiones + `ai_profile`), `embedding`→`property_embeddings` (FK 1:1, no polimórfica).
+- **6 de 15 siguen fuera de alcance** de Epic 2/3: `building`, `property_listing`, `neighborhood`, `poi`, `market_snapshot`, `showing`, `offer` — pertenecen a otros bounded contexts (Inventory, Market Intelligence) o a épicas posteriores del Backlog (Appointment, Offer).
+
+## Esquema implementado (Epic 2 y 3) — migraciones 0003–0014
+
+Esquema físico vigente de las tablas tocadas por Epic 2 (Qualification) y Epic 3 (Recommendation),
+tal como quedó en la base tras `alembic upgrade head` (revisión 0014). Fuente: `alembic/versions/`
+y los ORM de `app/modules/*/infrastructure/db_models.py`.
+
+### buyer_profiles (Epic 2 — rol de `requirement_profile`)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| id | uuid PK | Identificador del perfil. |
+| organization_id | uuid FK | Organización dueña (índice). |
+| lead_id | uuid FK | Lead calificado — único: 1 perfil vigente por lead, sin historial. |
+| budget_min / budget_max | float | Rango de presupuesto (dimensión 1). |
+| locations | jsonb | Zonas preferidas, lista de distritos (dimensión 2). |
+| property_type | varchar(32) | Tipo de propiedad (dimensión 3). |
+| timeline | varchar(32) | Horizonte de compra (dimensión 4). |
+| must_haves | jsonb | Características imprescindibles (dimensión 5). |
+| financing_type | varchar(32) | Dimensión 6 — agregada por 0006 (US-208). |
+| decision_maker_mode | varchar(32) | Dimensión 7 — agregada por 0006 (US-208). |
+| ai_profile | jsonb | Snapshot de afinidad derivado de `conversation_memory` — 0009 (US-211). |
+| updated_at | timestamptz | Última actualización. |
+
+### lead_objections (Epic 2 — US-209, append-only)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| id | uuid PK | Identificador de la objeción. |
+| organization_id | uuid FK | Organización (índice). |
+| lead_id | uuid FK | Lead que objetó (índice). |
+| type | varchar(32) | Categoría de la objeción. |
+| raw_text | varchar(1024) | Texto original del lead. |
+| created_at | timestamptz | Momento del registro (índice). |
+
+### conversation_memory (Epic 2 — AI-102)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| id | uuid PK | Identificador de la señal. |
+| organization_id | uuid FK | Organización (índice) — extensión multi-tenant sobre el diseño del doc. |
+| conversation_id | uuid FK | Conversación origen (índice). |
+| lead_id | uuid FK | Lead asociado (índice). |
+| memory_type | varchar(32) | Tipo de señal extraída. |
+| entity_name | varchar(128) | Entidad nombrada. |
+| value | jsonb | Valor estructurado de la señal. |
+| confidence | float | Confianza de la extracción. |
+| created_at | timestamptz | Momento de extracción (índice). |
+
+### leads / conversations — columnas agregadas por Epic 2/3
+
+| Tabla.Campo | Tipo | Origen |
+|---|---|---|
+| leads.lead_classification | varchar(16) | 0007 (US-209) — Hot/Warm/Cold calculado por `LeadScoringService`. |
+| leads.contact_reference | text | 0005 — identificador compartido wacrm↔Chatwoot para resolver Lead desde Conversation. |
+| leads.buyer_persona | jsonb | 0009 (US-211) — persona inferida, nunca espejada desde wacrm. |
+| conversations.contact_reference | text | 0005 — contraparte del match. |
+| conversations.lead_id | uuid FK | 0005 — enlace resuelto por `LeadLinker`. |
+
+### properties (Epic 3 — US-309, reconciliada)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| id | uuid PK | Identificador de la propiedad. |
+| organization_id | uuid FK | Organización dueña (índice); UNIQUE (organization_id, external_id). |
+| external_id | varchar(64) | Id del inventario origen (p.ej. `SEED-001`). |
+| price | float | Precio. |
+| district | varchar(120) | Distrito — el atributo Python sigue siendo `zone` (0010 renombró `District`→`district`). |
+| property_type | varchar(32) | Tipo plano (`PropertyType`); la taxonomía de 3 niveles queda como mejora futura. |
+| features | jsonb | Lista de amenidades/características. |
+| description | varchar(2000) | Descripción libre — entra al `content_hash` del embedding. |
+| name_address | varchar(255) | Nombre/dirección comercial. |
+| estado | varchar(32) | Estado comercial — 0014 lo convirtió del enum `estado_propiedad` a varchar. |
+| link_references | jsonb | Lista de URLs de media/brochures/landing — 0010 la convirtió de text a jsonb; NO entra al `content_hash`. |
+| updated_at | timestamptz | Última actualización. |
+
+### property_embeddings (Epic 3 — US-304/US-308, rol de `embedding`)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| property_id | uuid PK FK | 1:1 con `properties` (ON DELETE CASCADE) — sin dispatcher polimórfico. |
+| vector | vector(1536) | pgvector real desde 0011; modelo `text-embedding-3-small`. Índice HNSW `vector_cosine_ops` (0013). |
+| model_version | varchar(32) | Versión del modelo de embedding. |
+| source_hash | varchar(64) | Hash del contenido embebido (price/zone/type/features/description) — evita recomputar sin cambios. |
+| computed_at | timestamptz | Momento del cómputo. |
+
+### recommendations (Epic 3 — US-310)
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| id | uuid PK | Identificador de la recomendación (1 fila por propiedad rankeada por búsqueda). |
+| organization_id | uuid FK | Organización (índice) — RLS habilitado por organization_id. |
+| lead_id | uuid FK | Lead destinatario (índice). |
+| buyer_profile_id | uuid FK NULL | Perfil usado en la búsqueda (ON DELETE SET NULL). |
+| property_id | uuid FK | FK directa a `properties` — no existe `property_listing`. |
+| rank | integer | Posición en el ranking. |
+| score | float | Score final. |
+| signals | jsonb | `RankingSignal[]` dinámico `[{"name","weight","value"}]` — reemplaza las 5 columnas de score fijas del diseño original. |
+| explanation | varchar(2000) | Explicación generada. |
+| neighborhood | jsonb NULL | Snapshot de enriquecimiento de barrio (US-307). |
+| feedback | jsonb NULL | Reservado para el learning loop — sin writer aún. |
+| generated_at | timestamptz | Momento de generación (índice). |
+| delivered_at | timestamptz NULL | Momento de entrega al lead. |
 
 ## Uso de JSONB
 

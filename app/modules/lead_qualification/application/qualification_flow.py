@@ -179,6 +179,23 @@ _RANGE_RE = re.compile(
 )
 _SINGLE_RE = re.compile(r"(?P<a>\d[\d.,]*)\s*(?P<au>k|mil)?", re.IGNORECASE)
 
+#: Words that mark a number as money talk even when the amount is small.
+_BUDGET_CONTEXT_KEYWORDS: tuple[str, ...] = (
+    "presupuesto",
+    "precio",
+    "pagar",
+    "invertir",
+    "cuesta",
+    "costar",
+    "dolares",
+    "soles",
+    "usd",
+    "$",
+)
+#: Below this, a bare number ("en 3 meses", "2 dormitorios") is almost
+#: certainly not a property budget.
+_MIN_PLAUSIBLE_BUDGET = 1000.0
+
 
 def _strip_accents(text: str) -> str:
     replacements = {"á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ñ": "n"}
@@ -218,6 +235,20 @@ def _extract_budget_range(text: str) -> tuple[float, float] | None:
         amount = _parse_amount(match.group("a"), match.group("au"))
         return (amount, amount)
     return None
+
+
+def has_budget_signal(text: str) -> bool:
+    """Routing guard for the turn orchestrator (`qualification_turn.py`):
+    decides whether `extract_budget` should run at all. A bare small number
+    ("en 3 meses", "2 dormitorios") is not money talk — without this guard the
+    budget extractor would capture it and corrupt the profile."""
+    amounts = _extract_budget_range(text)
+    if amounts is None:
+        return False
+    if amounts[1] >= _MIN_PLAUSIBLE_BUDGET:
+        return True
+    normalized = _normalize(text)
+    return any(keyword in normalized for keyword in _BUDGET_CONTEXT_KEYWORDS)
 
 
 async def extract_budget(
@@ -388,6 +419,57 @@ async def extract_financing_and_decision_mode(
         )
     except ProfileValidationError:
         return None  # unreachable: both fields are None or non-empty here
+
+    service = BuyerProfileCaptureService(session)
+    await service.update_profile(lead_id, patch)
+    return patch
+
+
+#: Bedroom count requires its keyword right after the number — a bare "3"
+#: is a timeline (or anything else), never a bedroom count.
+_BEDROOMS_RE = re.compile(
+    r"\b(\d{1,2}|un|una|uno|dos|tres|cuatro|cinco|seis)\s+"
+    r"(?:dormitorios?|habitacion(?:es)?|cuartos?|dorms?|ambientes?)\b"
+)
+
+_WORD_NUMBERS = {
+    "un": 1,
+    "una": 1,
+    "uno": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+    "seis": 6,
+}
+
+
+def _extract_bedroom_count(normalized_text: str) -> int | None:
+    match = _BEDROOMS_RE.search(normalized_text)
+    if match is None:
+        return None
+    raw = match.group(1)
+    count = _WORD_NUMBERS.get(raw) or int(raw)
+    return count if 1 <= count <= 15 else None
+
+
+async def extract_bedrooms(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    text: str,
+) -> ExtractionResult:
+    """Bedroom count — eighth profile dimension (2026-07-19 E2E review)."""
+    count = _extract_bedroom_count(_normalize(text))
+    if count is None:
+        return None
+
+    await _assert_tenant(session, lead_id, organization_id)
+    try:
+        patch = ProfilePatch(bedrooms=count)
+    except ProfileValidationError:
+        return None
 
     service = BuyerProfileCaptureService(session)
     await service.update_profile(lead_id, patch)

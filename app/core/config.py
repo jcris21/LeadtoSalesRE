@@ -57,10 +57,25 @@ class Settings(BaseSettings):
     recommendation_top_k: int = 3
     recommendation_enrichment_timeout_ms: int = 3000
 
-    # US-308: real embedding model (text-embedding-3-small, 1536 dims). When
-    # unset, ingestion falls back to the deterministic HashEmbeddingModel so
-    # tests and keyless dev environments make no network calls.
-    openai_api_key: str | None = None
+    # US-308: real embedding model (Gemini gemini-embedding-001, truncated to
+    # 1536 dims for the vector(1536) column + HNSW index). When unset,
+    # ingestion falls back to the deterministic HashEmbeddingModel so tests
+    # and keyless dev environments make no network calls.
+    gemini_api_key: str | None = None
+
+    # G1 generative fallback: LLM-backed extraction when the deterministic
+    # keyword extractors find no signal in a lead message. Reuses
+    # `gemini_api_key` (one Google key for embeddings + LLM); with it unset
+    # the fallback is disabled (keyword-only qualification), no network calls.
+    generative_extractor_model: str = "gemini-2.5-flash"
+
+    # G4 conversational brain: LLM-backed replies behind the provider-neutral
+    # `ChatModelPort` (conversation_ownership/infrastructure/llm_brain.py).
+    # Reuses the same platform key; with it unset the brain stays on
+    # TemplateBrain (deterministic, offline). The value names a model of the
+    # configured provider — swapping providers means a new ChatModelPort
+    # adapter, not code changes upstream.
+    conversation_llm_model: str = "gemini-2.5-flash"
 
     otel_service_name: str = "lead-to-sales-system"
     otel_exporter_otlp_endpoint: str | None = None

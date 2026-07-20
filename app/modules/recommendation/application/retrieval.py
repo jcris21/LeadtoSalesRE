@@ -20,10 +20,11 @@ ingestion workstream lands, purely by structural typing (no import needed).
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from app.modules.lead_qualification.domain.models import (
@@ -140,7 +141,9 @@ class SemanticRetrievalService:
         self,
         store: PropertyLookup,
         *,
-        embed_query: Callable[[BuyerProfile], tuple[float, ...]] = _default_embed_query,
+        embed_query: Callable[
+            [BuyerProfile], tuple[float, ...] | Awaitable[tuple[float, ...]]
+        ] = _default_embed_query,
     ) -> None:
         self._store = store
         self._embed_query = embed_query
@@ -151,14 +154,27 @@ class SemanticRetrievalService:
         if not candidates:
             return []
 
-        query_vector = self._embed_query(buyer_profile)
+        try:
+            query_vector = self._embed_query(buyer_profile)
+            if inspect.isawaitable(query_vector):
+                query_vector = await query_vector
+        except Exception:  # noqa: BLE001 — degraded ranking beats no recommendation
+            logger.exception(
+                "Query embedding failed; returning hard-filtered candidates unranked"
+            )
+            return candidates[:top_n]
 
         # US-304: SQL-first — on Postgres the ranking happens in the database
         # via pgvector `<->` and no cosine similarity runs in Python. A store
         # without the capability (SQLite tests, in-memory fakes) returns None
         # (or lacks the method) and the in-memory path below takes over.
+        # G2 guard: pgvector `<->` on mismatched dimensionality raises and
+        # aborts the handler's transaction, so the SQL path only runs when the
+        # query vector's length matches the stored embeddings (e.g. keyless
+        # 3-dim default vs vector(1536) store routes to the in-memory path,
+        # which degrades to neutral scores instead of crashing).
         sql_search = getattr(self._store, "semantic_search", None)
-        if sql_search is not None:
+        if sql_search is not None and await self._dimensions_match(candidates, query_vector):
             ranked = await sql_search(
                 candidate_ids=[candidate.id for candidate in candidates],
                 query_vector=query_vector,
@@ -180,3 +196,16 @@ class SemanticRetrievalService:
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [candidate for _, candidate in scored[:top_n]]
+
+    async def _dimensions_match(
+        self, candidates: list[Property], query_vector: tuple[float, ...]
+    ) -> bool:
+        """Probes one stored embedding (they all share the ingestion model) and
+        compares its length with the query vector's. False when nothing is
+        embedded yet — the SQL inner join and the in-memory path would both
+        yield [] there, so skipping SQL loses nothing."""
+        for candidate in candidates:
+            embedding = await self._store.get_embedding(candidate.id)
+            if embedding is not None:
+                return len(tuple(embedding.vector)) == len(query_vector)
+        return False

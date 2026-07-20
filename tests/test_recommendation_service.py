@@ -56,6 +56,7 @@ def _complete_profile(lead_id: uuid.UUID) -> BuyerProfile:
         must_haves=("balcony",),
         financing_type=FinancingType.CASH,
         decision_maker_mode=DecisionMakerMode.SOLO,
+        bedrooms=2,
     )
 
 

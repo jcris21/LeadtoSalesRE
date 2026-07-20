@@ -140,7 +140,17 @@ class SqlCapableStore:
 
     async def get_embedding(self, property_id):
         self.embedding_calls += 1
-        return None
+        # 2-dim, matching the test's query vector — the G2 dimension probe
+        # reads exactly one of these before green-lighting the SQL path.
+        from app.modules.recommendation.domain.models import PropertyEmbedding
+        from app.shared.domain.base import utcnow
+
+        return PropertyEmbedding(
+            property_id=property_id,
+            vector=(1.0, 0.0),
+            model_version="test",
+            computed_at=utcnow(),
+        )
 
 
 async def test_retrieve_uses_sql_path_and_never_python_cosine():
@@ -157,4 +167,6 @@ async def test_retrieve_uses_sql_path_and_never_python_cosine():
 
     assert result == [first, second]  # SQL ordering wins, top_n honored
     assert store.search_calls[0]["top_n"] == 2
-    assert store.embedding_calls == 0  # in-memory path never ran
+    # G2: exactly ONE embedding read (the dimension probe); the in-memory
+    # cosine path — which would read one per candidate — never ran.
+    assert store.embedding_calls == 1

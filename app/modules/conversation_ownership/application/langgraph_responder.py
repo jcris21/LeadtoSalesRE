@@ -117,8 +117,14 @@ _default_responder: LangGraphResponder | None = None
 
 def get_default_responder() -> LangGraphResponder:
     """Process-wide responder: one shared checkpointer so all turns of a
-    conversation land on the same thread state."""
+    conversation land on the same thread state. The brain is config-driven
+    (LLM when a key is present, templates otherwise); the import is lazy
+    because infrastructure.llm_brain imports this module's contracts."""
     global _default_responder
     if _default_responder is None:
-        _default_responder = LangGraphResponder()
+        from app.modules.conversation_ownership.infrastructure.llm_brain import (
+            get_default_conversation_brain,
+        )
+
+        _default_responder = LangGraphResponder(brain=get_default_conversation_brain())
     return _default_responder

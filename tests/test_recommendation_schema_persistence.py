@@ -38,7 +38,7 @@ from app.modules.recommendation.domain.models import (
 from app.modules.recommendation.infrastructure.db_models import RecommendationORM
 from app.modules.recommendation.infrastructure.embedding_model import (
     EmbeddingGenerationError,
-    OpenAIEmbeddingModel,
+    GeminiEmbeddingModel,
     build_embedding_model,
 )
 from app.modules.recommendation.infrastructure.repository import (
@@ -122,27 +122,31 @@ def _mock_client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_openai_embedding_returns_1536_vector(seeded_org):
+async def test_gemini_embedding_returns_normalized_1536_vector(seeded_org):
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json
 
         captured["payload"] = json.loads(request.content)
-        captured["auth"] = request.headers.get("Authorization")
-        return httpx.Response(200, json={"data": [{"embedding": [0.001] * 1536}]})
+        captured["auth"] = request.headers.get("x-goog-api-key")
+        return httpx.Response(200, json={"embedding": {"values": [0.001] * 1536}})
 
-    model = OpenAIEmbeddingModel("sk-test", client=_mock_client(handler))
+    model = GeminiEmbeddingModel("test-key", client=_mock_client(handler))
     vector = await model.embed(_property(seeded_org))
 
     assert len(vector) == 1536
-    assert captured["payload"]["model"] == "text-embedding-3-small"
-    assert "Depto luminoso." in captured["payload"]["input"]
-    assert captured["auth"] == "Bearer sk-test"
-    assert model.model_version == "text-embedding-3-small"
+    assert captured["payload"]["model"] == "models/gemini-embedding-001"
+    assert captured["payload"]["taskType"] == "RETRIEVAL_DOCUMENT"
+    assert captured["payload"]["outputDimensionality"] == 1536
+    assert "Depto luminoso." in captured["payload"]["content"]["parts"][0]["text"]
+    assert captured["auth"] == "test-key"
+    assert model.model_version == "gemini-embedding-001"
+    # Truncated Gemini vectors are re-normalized client-side to unit L2 norm.
+    assert abs(sum(v * v for v in vector) - 1.0) < 1e-6
 
 
-async def test_openai_embedding_retries_once_then_succeeds(seeded_org, monkeypatch):
+async def test_gemini_embedding_retries_once_then_succeeds(seeded_org, monkeypatch):
     monkeypatch.setattr(embedding_model_module, "_RETRY_BACKOFF_SECONDS", 0.0)
     calls = {"count": 0}
 
@@ -150,27 +154,27 @@ async def test_openai_embedding_retries_once_then_succeeds(seeded_org, monkeypat
         calls["count"] += 1
         if calls["count"] == 1:
             return httpx.Response(429, json={"error": "rate limited"})
-        return httpx.Response(200, json={"data": [{"embedding": [0.5] * 1536}]})
+        return httpx.Response(200, json={"embedding": {"values": [0.5] * 1536}})
 
-    model = OpenAIEmbeddingModel("sk-test", client=_mock_client(handler))
+    model = GeminiEmbeddingModel("test-key", client=_mock_client(handler))
     vector = await model.embed(_property(seeded_org))
     assert calls["count"] == 2
     assert len(vector) == 1536
 
 
-async def test_openai_embedding_raises_after_second_failure(seeded_org, monkeypatch):
+async def test_gemini_embedding_raises_after_second_failure(seeded_org, monkeypatch):
     monkeypatch.setattr(embedding_model_module, "_RETRY_BACKOFF_SECONDS", 0.0)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": "down"})
 
-    model = OpenAIEmbeddingModel("sk-test", client=_mock_client(handler))
+    model = GeminiEmbeddingModel("test-key", client=_mock_client(handler))
     with pytest.raises(EmbeddingGenerationError):
         await model.embed(_property(seeded_org))
 
 
 def test_build_embedding_model_selects_by_key():
-    assert isinstance(build_embedding_model("sk-real"), OpenAIEmbeddingModel)
+    assert isinstance(build_embedding_model("real-key"), GeminiEmbeddingModel)
     assert isinstance(build_embedding_model(None), HashEmbeddingModel)
 
 

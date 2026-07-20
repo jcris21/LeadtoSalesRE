@@ -73,6 +73,7 @@ async def complete_profile(session_factory, seeded_org, seeded_lead):
         must_haves=("balcony",),
         financing_type=FinancingType.CASH,
         decision_maker_mode=DecisionMakerMode.SOLO,
+        bedrooms=2,
     )
     async with session_factory() as session:
         await BuyerProfileRepository(session).save(seeded_org, profile)

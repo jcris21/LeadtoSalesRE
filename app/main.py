@@ -11,7 +11,14 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+import truststore
 from fastapi import FastAPI
+
+# Verify outbound TLS (OpenAI, Chatwoot, Maps) against the OS certificate
+# store: corporate/AV TLS interception installs its root CA there but not in
+# certifi's bundle, which makes every httpx call fail with
+# CERTIFICATE_VERIFY_FAILED.
+truststore.inject_into_ssl()
 
 from app.core.config import get_settings
 from app.core.organization_context import OrganizationContextMiddleware

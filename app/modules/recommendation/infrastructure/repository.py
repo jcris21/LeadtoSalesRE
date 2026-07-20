@@ -64,6 +64,31 @@ class PropertyRepository:
         return row.source_hash if row is not None else None
 
     async def save_embedding(self, embedding: PropertyEmbedding, *, source_hash: str) -> None:
+        if self._session.bind.dialect.name == "postgresql":
+            # The ORM column stays portable JSON (SQLite tests), but the real
+            # Postgres column is vector(1536) — binding through the ORM emits
+            # `$n::JSON` and fails, so upsert with an explicit vector cast
+            # (same dialect-gated pattern as `semantic_search`).
+            vector_literal = "[" + ",".join(f"{v:.10f}" for v in embedding.vector) + "]"
+            await self._session.execute(
+                text(
+                    "INSERT INTO property_embeddings "
+                    "(property_id, vector, model_version, source_hash, computed_at) "
+                    "VALUES (:property_id, CAST(:vec AS vector), :model_version, "
+                    ":source_hash, :computed_at) "
+                    "ON CONFLICT (property_id) DO UPDATE SET "
+                    "vector = EXCLUDED.vector, model_version = EXCLUDED.model_version, "
+                    "source_hash = EXCLUDED.source_hash, computed_at = EXCLUDED.computed_at"
+                ),
+                {
+                    "property_id": str(embedding.property_id),
+                    "vec": vector_literal,
+                    "model_version": embedding.model_version,
+                    "source_hash": source_hash,
+                    "computed_at": embedding.computed_at,
+                },
+            )
+            return
         row = await self._session.get(PropertyEmbeddingORM, embedding.property_id)
         if row is None:
             row = PropertyEmbeddingORM(property_id=embedding.property_id)

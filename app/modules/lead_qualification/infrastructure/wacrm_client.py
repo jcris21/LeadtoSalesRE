@@ -153,6 +153,25 @@ class WacrmClient:
         results = await self._list_deals(organization_id, {"contact_phone": contact_reference})
         return results[0] if results else None
 
+    async def create_lead(
+        self, *, contact_reference: str, contact_name: str, dni: str | None = None
+    ) -> WacrmLeadSnapshot:
+        """G8: a lead born in the chat is created in wacrm (SoR) the moment
+        the contact gives their name. The deal starts in stage 'New'; the
+        phone is the shared `contact_reference` the LeadLinker matches on.
+        `contact_dni` follows update_stage's convention: absent key, not null."""
+        body: dict[str, object] = {
+            "contact_phone": contact_reference,
+            "contact_name": contact_name,
+            "stage_name": "New",
+        }
+        if dni is not None:
+            body["contact_dni"] = dni
+        async with self._http() as client:
+            response = await client.post("/deals", json=body)
+            response.raise_for_status()
+            return _parse_snapshot(_unwrap(response.json()), self._organization_id)
+
     async def update_stage(
         self, crm_lead_id: str, pipeline_stage: str, assigned_broker_id: uuid.UUID | None = None
     ) -> WacrmLeadSnapshot:
