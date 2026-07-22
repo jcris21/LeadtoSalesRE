@@ -44,6 +44,7 @@ ALLOWED_ACTORS: frozenset[str] = frozenset(
         "coordinator",
         "staleness_guard",
         "profile_capture",
+        "scheduling_service",
     }
 )
 

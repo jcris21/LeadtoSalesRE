@@ -1,6 +1,8 @@
 # Lead-to-Visit WhatsApp Agent — Agentic System Design
 
-**Versión:** 1.0 · **Fecha:** 2026-07-04 · **Modo:** Diseño · **Veredicto ARSDA:** 🟡 **4.15 — Scale with Caution** (ver §9)
+**Versión:** 1.1 · **Fecha diseño:** 2026-07-04 · **Fecha última verificación contra código:** 2026-07-20 · **Modo:** Diseño + Implementación · **Veredicto ARSDA:** 🟡 **4.15 — Scale with Caution** (ver §9)
+
+> §§0–11 describen el **diseño objetivo** (aspiracional, tal como se escribió el 2026-07-04). La **§12** documenta el **estado real verificado en código** (grafo LangGraph, tools, wiring) a 2026-07-20 — léela para saber qué de lo anterior ya existe y qué sigue siendo diseño a construir.
 
 Sistema conversacional AI-first que convierte leads digitales de WhatsApp en visitas agendadas mediante conversación consultiva. Se diseña dentro de las constraints de ArchitecturalDrivers v0.2: Chatwoot (SoR conversaciones), wacrm (SoR leads), FastAPI + Supabase (dominio AI), monolito modular organization-ready.
 
@@ -278,3 +280,98 @@ Por cada decisión se traza (Gate 9): agente/nodo · prompt version · contexto 
 | **1–30 Cimientos** | Contratos de las 9 tools con schemas estrictos y ejemplos; Coordinator + Router en LangGraph con checkpoints; retry/timeout/logging en toda tool call; guardrails de descuento/dinero/precio; trace mínimo viable | Happy path 1–4 operativo con escalado a humano funcionando | Lead técnico |
 | **31–60 Profundidad** | Matching + Availability Validator + Scheduling; KB de objeciones v1 con benchmark de retrieval (precision@k sobre 8 categorías); eval pipeline con los 10 casos QA en CI/CD; permission audit por tool; máquina de estados completa con Dormant | Happy path completo 1–8; regresiones bloquean deploy | ML + Backend |
 | **61–90 Excelencia** | Ownership Policy Engine v1 (escenarios 1, 2, 8) + reactivaciones A11; dashboard de KPIs del journey; dog fooding semanal con backlog de paper cuts; circuit breakers wacrm/Calendar; re-validación automática 2–4h pre-visita; PRD v2 con datos reales | Sistema 🟡→🟢 en Gates 1 y 9; decisión informada de escalar | PM + equipo |
+
+---
+
+## 12. Estado Real de Implementación — Grafo LangGraph, Tools y Wiring (verificado 2026-07-20)
+
+Esta sección refleja el código tal como existe hoy, no el diseño de §§1–11. Fuente: lectura directa de `app/modules/conversation_ownership/`, `app/modules/lead_qualification/`, `app/modules/recommendation/` y `app/main.py`.
+
+### 12.1 El grafo LangGraph real
+
+El único `StateGraph` de todo el repo vive en `langgraph_responder.py`. Es deliberadamente mínimo — **un solo nodo**:
+
+```mermaid
+flowchart LR
+  START((START)) --> Respond["respond\n(_respond_node)"]
+  Respond --> END((END))
+
+  Respond -. usa .-> Brain{{"ConversationBrain\n.generate()"}}
+  Brain -->|"settings.gemini_api_key set"| LLMBrain["LLMConversationBrain\n→ GeminiChatModel.complete\n(Gemini generateContent, thinkingBudget:0)"]
+  Brain -->|"sin API key / fallback"| TemplateBrain["TemplateBrain\n(determinista, sin LLM)"]
+  LLMBrain -.fallo/reply vacío.-> TemplateBrain
+
+  CP[("InMemorySaver\nthread_id = conversation_id")] -.checkpoint de\nTurnState.messages.-> Respond
+```
+
+**State (`TurnState`, TypedDict):** `messages: list[dict] (acumulado por el checkpointer)` · `system_prompt: str` · `user_input: str` · `reply: str`.
+
+**Por qué solo un nodo:** el docstring del archivo es explícito — todo lo no conversacional (guardrail, ownership, FSM, calificación, persistencia) ya vive en servicios deterministas alrededor de `CoordinatorAgent`; el grafo existe casi exclusivamente por su **checkpointer** (historial de conversación resumible por `thread_id`), no por orquestación multi-nodo. No hay edges condicionales, no hay loops, no hay `ToolNode`.
+
+### 12.2 Grafo de llamadas completo (Coordinator + event bus) — lo que realmente sustituye al "SAS multi-nodo" de §2
+
+```mermaid
+flowchart TD
+  WH[Webhook Chatwoot] --> MR["MessageReceived\n(event bus)"]
+  MR --> CO["CoordinatorAgent.handle_message"]
+
+  CO --> G["GuardrailInterceptor.check\n(regex, síncrono)"]
+  G -->|bypass detectado| HO[Transfer ownership → humano] --> STOP1((fin, sin grafo))
+  G -->|ok| OPE["OwnershipPolicyEngine.evaluate\n(FSM NEW→AI_OWNED→QUALIFICATION,\nsolo escenarios 1 y 8 de la matriz E14)"]
+
+  OPE --> ID{"¿Lead ya vinculado?"}
+  ID -->|no| IDX["extract_identity (regex)"] -->|éxito| LSA1["LeadSyncAdapter.create_lead\n(wacrm write)"]
+  ID -->|sí| QT["run_qualification_turn"]
+
+  QT --> QF["qualification_flow.*\n(extractores regex: budget, location,\nproperty_type, timeline, financing,\nbedrooms, objection)"]
+  QF -->|sin match| GEX["GeminiGenerativeExtractor.extract\n(Gemini JSON-mode, fallback)"]
+  QF --> BPC["BuyerProfileCaptureService.update_profile"]
+  GEX --> BPC
+  BPC -->|completeness ≥ umbral| PC["publica ProfileCompleted"]
+
+  CO --> LGR["LangGraphResponder.respond\n(grafo §12.1: nodo 'respond')"]
+  LGR --> RR["publica ResponseReady"]
+
+  PC --> LQW["lead_qualification.wiring\n.handle_profile_completed"]
+  LQW --> LSA2["LeadSyncAdapter.push_profile_update\n(wacrm write)"]
+
+  PC --> RW["recommendation.wiring\n.handle_profile_completed"]
+  RW --> SF["StructuredFilterService.filter_candidates\n(SQL: budget/zona/tipo)"]
+  SF --> SR["SemanticRetrievalService.retrieve\n(pgvector <-> / cosine fallback)"]
+  SR --> WRE["WeightedRankingEngine"]
+  WRE --> EG["ExplanationGenerator.explain\n(por señales precomputadas, sin candidate list)"]
+  EG --> NE["NeighborhoodEnrichmentAdapter\n(Google Maps, opcional)"]
+  NE --> NAR["GeminiRecommendationNarrator.narrate\n(Gemini chat, closing paragraph)"]
+  NAR --> RR2["publica ResponseReady"]
+
+  RR --> COW["conversation_ownership.wiring\n.handle_response_ready"]
+  RR2 --> COW
+  COW --> CW["ChatwootClient.send_message"]
+```
+
+### 12.3 Tools reales vinculadas a un LLM
+
+**Ninguna.** No hay `@tool`, `bind_tools`, `ToolNode` ni `create_react_agent` en el repo — cero tool-calling. Los tres únicos LLM calls son completions de un solo turno (Gemini `generateContent`, `thinkingBudget: 0`, `httpx` directo, sin cliente LangChain):
+
+| Call site | Propósito | Tool-calling |
+|---|---|---|
+| `llm_brain.GeminiChatModel.complete` | Respuesta conversacional (nodo `respond` del grafo) | No |
+| `generative_extractor.GeminiGenerativeExtractor.extract` | Fallback de calificación, salida JSON estructurada | No |
+| `llm_narrator.GeminiRecommendationNarrator.narrate` | Párrafo de cierre del Top-3 de recomendación | No |
+
+Lo que en §2 se modeló como "tool calls" del Coordinator (`get_lead`, `update_profile`, `search_properties`, `check_availability`, `propose_slots`, `book_visit`, `handoff`, `send_property_pack`, `register_offer`) hoy son **llamadas directas a servicios Python** desde `CoordinatorAgent` (no tools de un agente LLM) — el LLM nunca decide qué función invocar; el flujo es 100% determinista y el LLM solo redacta texto en 3 puntos puntuales.
+
+### 12.4 Mapeo diseño (§§1–2) → código real
+
+| Componente del diseño | Artefacto real | Estado |
+|---|---|---|
+| Coordinator Agent | `coordinator.py::CoordinatorAgent` | Implementado, pero como orquestador determinista — el LLM solo vive dentro del nodo `respond` que invoca |
+| Intent Router | — | **No implementado.** El grafo tiene un solo nodo; no hay clasificación de intención explícita |
+| Objection Handler (+RAG) | `qualification_flow.py::extract_objection` + `LeadScoringService.record_objection` | Solo detección por keyword + efecto de scoring; no genera respuesta conversacional a la objeción, no hay RAG |
+| Matching Engine | `retrieval.py` (`StructuredFilterService` + `SemanticRetrievalService`) + `WeightedRankingEngine` | Implementado, pero vive en el pipeline event-driven de Recommendation, fuera del grafo/Coordinator |
+| Availability Validator | — | **No implementado.** No existe módulo de disponibilidad/citas |
+| Scheduling Service | — | **No implementado.** Módulo de Appointment referenciado en roadmap, sin código aún |
+| Ownership Policy Engine | `ownership_policy.py::OwnershipPolicyEngine` | Parcial — solo 2 de 10 escenarios de la matriz E14 (1 y 8); el resto lanza `NotImplementedPlaceholder` explícito |
+| Guardrails Layer | `guardrail.py::GuardrailInterceptor` | Implementado como detector regex síncrono, corre antes que cualquier otra cosa en `handle_message` |
+
+**Consecuencia para §5 (Framework) y §9 (ARSDA):** la elección de LangGraph se justificó por checkpoints de estado persistentes y HITL — hoy el checkpointer sí se usa (historial por `thread_id`, `InMemorySaver`, swap a Postgres pendiente Sprint 8), pero el HITL de primera clase de LangGraph (`interrupt`) **no se usa**: el guardrail actúa fuera del grafo, antes de invocarlo. La arquitectura real es más cercana a "microservicios deterministas + 3 llamadas LLM puntuales coordinadas por event bus" que al SAS conversacional único descrito en §1.
