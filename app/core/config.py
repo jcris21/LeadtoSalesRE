@@ -4,6 +4,7 @@ is NOT here — it lives in the OrganizationConfig aggregate in Postgres, per
 ArchitecturalDrivers Sprint 0 ("per-organization configuration model")."""
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -79,6 +80,14 @@ class Settings(BaseSettings):
 
     otel_service_name: str = "lead-to-sales-system"
     otel_exporter_otlp_endpoint: str | None = None
+
+    # G13: durable LangGraph checkpointer. "postgres" survives process restarts
+    # (AsyncPostgresSaver, own psycopg pool); "memory" is the pre-fix behavior,
+    # useful as a rollback lever if the Postgres checkpointer misbehaves.
+    conversation_checkpointer: Literal["memory", "postgres"] = "postgres"
+    # Active checkpoint window, in turns (one turn = one user+assistant pair).
+    # Turns evicted from the window are folded into TurnState.summary.
+    conversation_history_window_turns: int = 12
 
 
 @lru_cache

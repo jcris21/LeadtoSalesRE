@@ -9,6 +9,7 @@ and Engagement modules are added in their respective sprints.
 
 import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 import truststore
@@ -20,8 +21,20 @@ from fastapi import FastAPI
 # CERTIFICATE_VERIFY_FAILED.
 truststore.inject_into_ssl()
 
+# G13: psycopg's async mode (langgraph-checkpoint-postgres) raises
+# `InterfaceError` under Python's default Windows event loop (ProactorEventLoop)
+# — verified directly against the configured Supabase host. asyncpg has no
+# such restriction, so this was never needed before psycopg was added. No
+# subprocess usage exists in this codebase, so SelectorEventLoop is a safe
+# policy switch; Linux/macOS deploys are unaffected (they never use Proactor).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from app.core.config import get_settings
 from app.core.organization_context import OrganizationContextMiddleware
+from app.modules.appointment.infrastructure import (
+    db_models as appointment_db_models,  # noqa: F401  (registers ORM on Base.metadata; no event wiring yet — US-402)
+)
 from app.modules.auth.router import router as auth_router
 from app.modules.conversation_memory.infrastructure import (
     db_models as conversation_memory_db_models,  # noqa: F401  (registers ORM on Base.metadata; no API router yet — AI-102)
@@ -66,6 +79,12 @@ async def _dormancy_decay_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.modules.conversation_ownership.application.langgraph_responder import (
+        init_persistent_responder,
+        shutdown_persistent_responder,
+    )
+
+    await init_persistent_responder()
     worker_task = asyncio.create_task(event_bus.run_forever())
     decay_task = asyncio.create_task(_dormancy_decay_loop())
     crm_sync_task = asyncio.create_task(crm_sync_loop())
@@ -80,6 +99,7 @@ async def lifespan(app: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+        await shutdown_persistent_responder()
 
 
 app = FastAPI(title="Lead to Sales System", version="0.1.0", lifespan=lifespan)
