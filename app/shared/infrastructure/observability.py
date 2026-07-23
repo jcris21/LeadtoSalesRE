@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from langsmith.run_helpers import get_current_run_tree
+from langsmith.run_helpers import trace as langsmith_trace
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -73,34 +74,49 @@ async def trace_decision(
     prompt_version_id: uuid.UUID | None = None,
     conversation_id: uuid.UUID | None = None,
 ) -> AsyncIterator[DecisionTraceRecorder]:
-    """Wraps one AI decision in an OTel span and persists an AIDecisionTrace row
-    on exit, regardless of success (partial traces beat missing traces)."""
+    """Wraps one AI decision in an OTel span and a root LangSmith trace, and
+    persists an AIDecisionTrace row on exit, regardless of success (partial
+    traces beat missing traces).
+
+    The `langsmith_trace(...)` context manager establishes the root run for
+    this decision so that any `@traceable`-decorated call made inside the
+    block (the LangGraph responder, generative extractor, recommendation
+    narrator, conversation brain — Tasks 4-7) nests under it via LangSmith's
+    contextvar propagation, and — critically — so `get_current_run_tree()`
+    still resolves to this root run inside `finally`, after those nested
+    calls have returned and torn down their own child run context. Reading
+    `recorder.langsmith_run_url` any later (e.g. after this block exits)
+    would see `None`, since the root run's own context is gone by then. When
+    LangSmith tracing is disabled (the default), `langsmith_trace` is a
+    zero-cost no-op: no run is pushed onto any contextvar and no outbound
+    calls are made, so `recorder.langsmith_run_url` stays `None` throughout."""
     start = time.monotonic()
     recorder = DecisionTraceRecorder()
     with _tracer.start_as_current_span(f"ai_decision.{agent_name}") as span:
-        try:
-            yield recorder
-        finally:
-            latency_ms = int((time.monotonic() - start) * 1000)
-            span.set_attribute("organization_id", str(organization_id))
-            span.set_attribute("agent_name", agent_name)
-            span.set_attribute("latency_ms", latency_ms)
-            session.add(
-                AIDecisionTraceORM(
-                    id=new_id(),
-                    organization_id=organization_id,
-                    agent_name=agent_name,
-                    prompt_version_id=prompt_version_id,
-                    conversation_id=conversation_id,
-                    tool_calls=recorder.tool_calls,
-                    context_refs=recorder.context_refs,
-                    cost_usd=recorder.cost_usd,
-                    latency_ms=latency_ms,
-                    output=recorder.output,
-                    langsmith_run_url=recorder.langsmith_run_url,
-                    created_at=utcnow(),
+        async with langsmith_trace(f"ai_decision.{agent_name}", run_type="chain"):
+            try:
+                yield recorder
+            finally:
+                latency_ms = int((time.monotonic() - start) * 1000)
+                span.set_attribute("organization_id", str(organization_id))
+                span.set_attribute("agent_name", agent_name)
+                span.set_attribute("latency_ms", latency_ms)
+                session.add(
+                    AIDecisionTraceORM(
+                        id=new_id(),
+                        organization_id=organization_id,
+                        agent_name=agent_name,
+                        prompt_version_id=prompt_version_id,
+                        conversation_id=conversation_id,
+                        tool_calls=recorder.tool_calls,
+                        context_refs=recorder.context_refs,
+                        cost_usd=recorder.cost_usd,
+                        latency_ms=latency_ms,
+                        output=recorder.output,
+                        langsmith_run_url=recorder.langsmith_run_url,
+                        created_at=utcnow(),
+                    )
                 )
-            )
 
 
 class DecisionTraceRecorder:
