@@ -132,3 +132,22 @@ async def test_gemini_extractor_returns_none_on_terminal_http_error():
 
     patch = await extractor.extract(text="hola", missing_dimensions=ALL_DIMENSIONS)
     assert patch is None
+
+
+@pytest.mark.asyncio
+async def test_extract_is_traceable_and_still_returns_patch_when_tracing_disabled():
+    """Characterization test: decorating extract() with @traceable must not
+    change its return value when tracing is disabled (default test env)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _gemini_response({"property_type": "apartment", "timeline": None})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    extractor = GeminiGenerativeExtractor("test-key", "gemini-2.5-flash", client)
+
+    patch = await extractor.extract(
+        text="busco depa, mi correo es lead@example.com",
+        missing_dimensions=("property_type", "timeline"),
+    )
+
+    assert patch is not None and patch.property_type is PropertyType.APARTMENT

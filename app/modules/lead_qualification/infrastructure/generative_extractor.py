@@ -25,6 +25,7 @@ import logging
 from typing import Protocol
 
 import httpx
+from langsmith import traceable
 
 from app.core.config import get_settings
 from app.modules.lead_qualification.domain.models import (
@@ -36,6 +37,7 @@ from app.modules.lead_qualification.domain.models import (
     PropertyType,
     Timeline,
 )
+from app.shared.infrastructure.pii_redaction import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,17 @@ class GenerativeExtractorPort(Protocol):
     ) -> ProfilePatch | None: ...
 
 
+def _redact_extract_inputs(inputs: dict) -> dict:
+    return {
+        "text": redact_pii(inputs.get("text")),
+        "missing_dimensions": inputs.get("missing_dimensions"),
+    }
+
+
+def _redact_extract_output(output: object) -> dict:
+    return {"patch": vars(output) if output is not None else None}
+
+
 class GeminiGenerativeExtractor:
     """`GenerativeExtractorPort` over the Gemini `generateContent` API (httpx,
     no SDK dependency — mirrors `GeminiEmbeddingModel`). One retry on 429/5xx;
@@ -95,6 +108,12 @@ class GeminiGenerativeExtractor:
         self._model = model
         self._client = client or httpx.AsyncClient(timeout=15.0)
 
+    @traceable(
+        run_type="llm",
+        name="gemini_generative_extractor_extract",
+        process_inputs=_redact_extract_inputs,
+        process_outputs=_redact_extract_output,
+    )
     async def extract(
         self, *, text: str, missing_dimensions: tuple[str, ...]
     ) -> ProfilePatch | None:
