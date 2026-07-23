@@ -70,6 +70,17 @@ async def test_trace_decision_root_run_stays_current_through_finally_after_neste
     # deterministic way to force the "enabled" branch for this one test.
     monkeypatch.setattr("langsmith.utils.tracing_is_enabled", lambda *a, **kw: True)
     monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_pt_test_fake_key_for_local_context_test_only")
+    # Forcing tracing "enabled" makes the SDK submit runs over HTTP on a
+    # background thread; with a fake key that attempt fails and logs a
+    # warning/traceback (sometimes only visible at interpreter shutdown,
+    # since submission is asynchronous). Stubbing `Client.request_with_retries`
+    # does NOT reliably suppress this: the background thread can fire the
+    # real request after this test function (and its monkeypatch) has
+    # already returned, so the patch is gone by the time it's needed —
+    # confirmed by testing that approach directly. The noise is cosmetic
+    # (does not fail this test or affect the process exit code); avoiding it
+    # fully would require patching the SDK's background-thread machinery
+    # itself, which is disproportionate to what this test needs to prove.
     org_id = new_id()
 
     @traceable(run_type="llm", name="nested_call_inside_decision")
