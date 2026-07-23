@@ -25,6 +25,9 @@ import logging
 from typing import Protocol
 
 import httpx
+from langsmith import traceable
+
+from app.shared.infrastructure.pii_redaction import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,25 @@ class RecommendationNarrator(Protocol):
     async def narrate(self, *, profile: dict, entries: list[dict]) -> str | None: ...
 
 
+def _redact_value(value: object) -> object:
+    return redact_pii(value) if isinstance(value, str) else value
+
+
+def _redact_dict(data: dict) -> dict:
+    return {key: _redact_value(value) for key, value in data.items()}
+
+
+def _redact_narrate_inputs(inputs: dict) -> dict:
+    return {
+        "profile": _redact_dict(inputs.get("profile") or {}),
+        "entries": [_redact_dict(entry) for entry in inputs.get("entries") or []],
+    }
+
+
+def _redact_narrate_output(output: object) -> dict:
+    return {"text": redact_pii(output) if isinstance(output, str) else output}
+
+
 class GeminiRecommendationNarrator:
     """`RecommendationNarrator` over the Gemini `generateContent` API."""
 
@@ -73,6 +95,12 @@ class GeminiRecommendationNarrator:
         self._model = model
         self._client = client or httpx.AsyncClient(timeout=20.0)
 
+    @traceable(
+        run_type="llm",
+        name="gemini_recommendation_narrator_narrate",
+        process_inputs=_redact_narrate_inputs,
+        process_outputs=_redact_narrate_output,
+    )
     async def narrate(self, *, profile: dict, entries: list[dict]) -> str | None:
         prompt_lines = ["Perfil del comprador:"]
         prompt_lines += [f"- {key}: {value}" for key, value in profile.items() if value]
