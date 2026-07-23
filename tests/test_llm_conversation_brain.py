@@ -165,3 +165,23 @@ async def test_gemini_adapter_raises_chat_model_error_on_terminal_http_failure()
             system_prompt=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": "hola"}],
         )
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_is_traceable_and_still_returns_reply_when_tracing_disabled():
+    """Tracing must be fail-safe: with LANGSMITH_TRACING unset (default test
+    environment), decorating complete() with @traceable changes nothing
+    observable — same request, same reply, same exception behavior."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _chat_response("respuesta trazada")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    model = GeminiChatModel("test-key", "test-model", client)
+
+    reply = await model.complete(
+        system_prompt=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": "hola, mi correo es ana@example.com"}],
+    )
+
+    assert reply == "respuesta trazada"

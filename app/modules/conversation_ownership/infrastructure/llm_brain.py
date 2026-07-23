@@ -29,12 +29,14 @@ import time
 from typing import Protocol
 
 import httpx
+from langsmith import traceable
 
 from app.core.config import get_settings
 from app.modules.conversation_ownership.application.langgraph_responder import (
     ConversationBrain,
     TemplateBrain,
 )
+from app.shared.infrastructure.pii_redaction import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,20 @@ class LLMConversationBrain:
         return reply
 
 
+def _redact_complete_inputs(inputs: dict) -> dict:
+    return {
+        "system_prompt": redact_pii(inputs.get("system_prompt")),
+        "messages": [
+            {**message, "content": redact_pii(message.get("content"))}
+            for message in inputs.get("messages", [])
+        ],
+    }
+
+
+def _redact_complete_output(output: object) -> dict:
+    return {"reply": redact_pii(output) if isinstance(output, str) else output}
+
+
 class GeminiChatModel:
     """`ChatModelPort` over the Gemini `generateContent` API — the only
     provider-aware code on the conversational path (httpx, no SDK; mirrors
@@ -113,6 +129,12 @@ class GeminiChatModel:
         self.label = model
         self._client = client or httpx.AsyncClient(timeout=15.0)
 
+    @traceable(
+        run_type="llm",
+        name="gemini_conversation_brain_complete",
+        process_inputs=_redact_complete_inputs,
+        process_outputs=_redact_complete_output,
+    )
     async def complete(self, *, system_prompt: str, messages: list[dict[str, str]]) -> str:
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
