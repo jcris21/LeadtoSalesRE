@@ -23,3 +23,22 @@ def redact_pii(text: str | None) -> str | None:
     redacted = _EMAIL_RE.sub("[REDACTED_EMAIL]", text)
     redacted = _PHONE_RE.sub("[REDACTED_PHONE]", redacted)
     return redacted
+
+
+def redact_pii_deep(value: object) -> object:
+    """Recursively walks dicts/lists/tuples, redacting every string found.
+
+    The per-call-site `process_inputs`/`process_outputs` hooks (Tasks 4-7)
+    know their payload's exact shape and redact specific fields. LangSmith's
+    client-level `hide_inputs`/`hide_outputs` hooks (wired in
+    `configure_langsmith_tracing`) receive arbitrary run payloads instead —
+    notably LangGraph's own auto-generated runs (`ainvoke`, the `respond`
+    node), which carry the full conversational state and are NOT covered by
+    any `@traceable` site's redaction. This is the catch-all for those."""
+    if isinstance(value, str):
+        return redact_pii(value)
+    if isinstance(value, dict):
+        return {key: redact_pii_deep(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(redact_pii_deep(item) for item in value)
+    return value

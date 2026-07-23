@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 from langsmith.run_helpers import get_current_run_tree
 from langsmith.run_helpers import trace as langsmith_trace
+from langsmith.run_trees import get_cached_client
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -27,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.modules.intelligence_ai_admin.infrastructure.db_models import AIDecisionTraceORM
 from app.shared.domain.base import new_id, utcnow
+from app.shared.infrastructure.pii_redaction import redact_pii_deep
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -53,7 +55,20 @@ def configure_langsmith_tracing(settings: "Settings | None" = None) -> None:
     narrator, LangGraph responder — Tasks 4/5/6/7) by setting the environment
     variables the `langsmith` SDK reads at call time. A no-op when tracing is
     disabled (the default), so an unconfigured deployment sees zero new
-    outbound calls, matching the `gemini_api_key`-unset degrade pattern."""
+    outbound calls, matching the `gemini_api_key`-unset degrade pattern.
+
+    When `langsmith_redact_pii` is also enabled, this seeds LangSmith's
+    process-wide client singleton (`get_cached_client`) with `redact_pii_deep`
+    as `hide_inputs`/`hide_outputs` — a global fallback that also covers runs
+    the per-call-site `@traceable` redaction hooks (Tasks 4/5/6/7) do NOT see,
+    most importantly LangGraph's own auto-generated runs for `ainvoke` and the
+    `respond` node, which otherwise carry the full unredacted conversational
+    state. Per-site hooks still take precedence where both apply (LangSmith
+    resolves function-level processors before client-level ones), so this is
+    additive, not a replacement. Must run before any traced call in the
+    process: the singleton is seeded once on first use and ignores kwargs on
+    subsequent calls, so calling this at boot (as `app/main.py` does) is what
+    makes the seeding actually take effect."""
     settings = settings or get_settings()
     if not settings.langsmith_tracing_enabled:
         return
@@ -63,6 +78,8 @@ def configure_langsmith_tracing(settings: "Settings | None" = None) -> None:
     os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
     if settings.langsmith_endpoint:
         os.environ["LANGSMITH_ENDPOINT"] = settings.langsmith_endpoint
+    if settings.langsmith_redact_pii:
+        get_cached_client(hide_inputs=redact_pii_deep, hide_outputs=redact_pii_deep)
 
 
 @asynccontextmanager
