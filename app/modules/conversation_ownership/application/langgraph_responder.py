@@ -36,8 +36,12 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
+from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+
+from app.shared.infrastructure.pii_redaction import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +112,18 @@ def _fold_summary(existing_summary: str, dropped_messages: list[dict[str, str]])
     return combined
 
 
+def _redact_respond_inputs(inputs: dict) -> dict:
+    return {
+        "system_prompt": redact_pii(inputs.get("system_prompt")),
+        "text": redact_pii(inputs.get("text")),
+        "conversation_id": str(inputs.get("conversation_id")),
+    }
+
+
+def _redact_respond_output(output: object) -> dict:
+    return {"reply": redact_pii(output) if isinstance(output, str) else output}
+
+
 class LangGraphResponder:
     """`ResponderPort` implementation on LangGraph with per-conversation
     checkpoints (`thread_id = conversation_id`)."""
@@ -156,7 +172,16 @@ class LangGraphResponder:
 
         return {"messages": windowed, "summary": summary, "reply": reply}
 
+    @traceable(
+        run_type="chain",
+        name="conversation_turn",
+        process_inputs=_redact_respond_inputs,
+        process_outputs=_redact_respond_output,
+    )
     async def respond(self, *, system_prompt: str, conversation_id: uuid.UUID, text: str) -> str:
+        run_tree = get_current_run_tree()
+        if run_tree is not None:
+            run_tree.metadata["conversation_id"] = str(conversation_id)
         result = await self._graph.ainvoke(
             {"system_prompt": system_prompt, "user_input": text},
             config={"configurable": {"thread_id": str(conversation_id)}},

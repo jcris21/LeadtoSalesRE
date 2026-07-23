@@ -169,3 +169,18 @@ async def test_restart_simulation_new_responder_instance_resumes_shared_checkpoi
         {"role": "user", "content": "turno 1"},
         {"role": "assistant", "content": "reply-1"},
     ]
+
+
+async def test_respond_is_traceable_and_still_returns_brain_reply_when_tracing_disabled():
+    """Characterization test: decorating respond() with @traceable must not
+    change its return value or the checkpointed history it produces."""
+    responder = LangGraphResponder(brain=RecordingBrain())
+    conversation_id = uuid.uuid4()
+
+    reply = await responder.respond(
+        system_prompt="prompt", conversation_id=conversation_id, text="hola, soy Ana, 987654321"
+    )
+
+    assert reply == "reply-1"
+    history = await responder.history(conversation_id)
+    assert history[0]["content"] == "hola, soy Ana, 987654321"  # real (unredacted) data persists
