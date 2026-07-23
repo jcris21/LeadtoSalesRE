@@ -55,7 +55,7 @@ from app.modules.recommendation.wiring import (
     register_event_handlers as register_recommendation_handlers,
 )
 from app.shared.infrastructure.event_bus import event_bus
-from app.shared.infrastructure.observability import setup_observability
+from app.shared.infrastructure.observability import configure_langsmith_tracing, setup_observability
 
 logging.basicConfig(level=get_settings().log_level)
 
@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Lead to Sales System", version="0.1.0", lifespan=lifespan)
 app.add_middleware(OrganizationContextMiddleware)
 setup_observability(app)
+configure_langsmith_tracing()
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(organizations_router, prefix="/api/v1")

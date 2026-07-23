@@ -7,10 +7,12 @@ the queryable record the AI Sidebar and later E13 dashboards read from.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from opentelemetry import trace
@@ -23,6 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.modules.intelligence_ai_admin.infrastructure.db_models import AIDecisionTraceORM
 from app.shared.domain.base import new_id, utcnow
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 _tracer = trace.get_tracer(__name__)
 
@@ -38,6 +43,24 @@ def setup_observability(app: FastAPI) -> None:
     provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
     trace.set_tracer_provider(provider)
     FastAPIInstrumentor.instrument_app(app)
+
+
+def configure_langsmith_tracing(settings: "Settings | None" = None) -> None:
+    """Activates LangSmith tracing for every `@traceable`-decorated function
+    in the process (conversation brain, generative extractor, recommendation
+    narrator, LangGraph responder — Tasks 4/5/6/7) by setting the environment
+    variables the `langsmith` SDK reads at call time. A no-op when tracing is
+    disabled (the default), so an unconfigured deployment sees zero new
+    outbound calls, matching the `gemini_api_key`-unset degrade pattern."""
+    settings = settings or get_settings()
+    if not settings.langsmith_tracing_enabled:
+        return
+    os.environ["LANGSMITH_TRACING"] = "true"
+    if settings.langsmith_api_key:
+        os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
+    os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
+    if settings.langsmith_endpoint:
+        os.environ["LANGSMITH_ENDPOINT"] = settings.langsmith_endpoint
 
 
 @asynccontextmanager
