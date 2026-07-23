@@ -69,6 +69,7 @@ class AIDecisionTraceORM(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     output: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    langsmith_run_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )

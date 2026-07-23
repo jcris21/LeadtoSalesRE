@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from langsmith.run_helpers import get_current_run_tree
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -96,6 +97,7 @@ async def trace_decision(
                     cost_usd=recorder.cost_usd,
                     latency_ms=latency_ms,
                     output=recorder.output,
+                    langsmith_run_url=recorder.langsmith_run_url,
                     created_at=utcnow(),
                 )
             )
@@ -109,6 +111,17 @@ class DecisionTraceRecorder:
         self.context_refs: list[str] = []
         self.cost_usd: float | None = None
         self.output: dict = {}
+
+    @property
+    def langsmith_run_url(self) -> str | None:
+        """Permalink to the active LangSmith run, if `configure_langsmith_tracing()`
+        enabled tracing and this call happens inside a traced span (Tasks 4/5/6/7).
+        `None` when tracing is disabled or no span is active — callers must treat
+        it as optional, same as `cost_usd`."""
+        run_tree = get_current_run_tree()
+        if run_tree is None:
+            return None
+        return f"https://smith.langchain.com/o/-/projects/p/-/r/{run_tree.id}"
 
     def record_tool_call(self, name: str, arguments: dict, result: object) -> None:
         self.tool_calls.append({"name": name, "arguments": arguments, "result": str(result)})
