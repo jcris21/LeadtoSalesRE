@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     otel_service_name: str = "lead-to-sales-system"
     otel_exporter_otlp_endpoint: str | None = None
 
+    # LangSmith instrumentation: traces the conversational turn (LangGraph
+    # chain) plus each Gemini call (LLM spans) for latency/quality debugging.
+    # Off by default — same optional-credential convention as gemini_api_key:
+    # with no key, no outbound calls, no behavior change. `langsmith_redact_pii`
+    # gates whether prompts/replies (which carry lead names, phones, emails)
+    # are scrubbed before leaving the process; keep this true unless the
+    # LangSmith project is self-hosted and inside the same trust boundary.
+    langsmith_tracing_enabled: bool = False
+    langsmith_api_key: str | None = None
+    langsmith_project: str = "lead-to-sales-system"
+    langsmith_endpoint: str | None = None
+    langsmith_redact_pii: bool = True
+
     # G13: durable LangGraph checkpointer. "postgres" survives process restarts
     # (AsyncPostgresSaver, own psycopg pool); "memory" is the pre-fix behavior,
     # useful as a rollback lever if the Postgres checkpointer misbehaves.
