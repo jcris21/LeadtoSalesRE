@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -173,11 +174,21 @@ _MUST_HAVE_MARKERS = (
     "tiene que tener",
 )
 
+#: Optional currency marker ("$", "S/", "USD", "US$") immediately before an
+#: amount — matched but not captured, so a range like "$100,000 y $150,000"
+#: or "S/ 200,000" still resolves to a plain numeric amount/range.
+_CURRENCY_PREFIX = r"(?:s/\.?|us\$|\$|usd)?\s*"
+
 _RANGE_RE = re.compile(
-    r"(?P<a>\d[\d.,]*)\s*(?P<au>k|mil)?\s*(?:-|a|y|hasta)\s*(?P<b>\d[\d.,]*)\s*(?P<bu>k|mil)?",
+    _CURRENCY_PREFIX
+    + r"(?P<a>\d[\d.,]*)\s*(?P<au>k|mil)?\s*(?:-|a|y|hasta)\s*"
+    + _CURRENCY_PREFIX
+    + r"(?P<b>\d[\d.,]*)\s*(?P<bu>k|mil)?",
     re.IGNORECASE,
 )
-_SINGLE_RE = re.compile(r"(?P<a>\d[\d.,]*)\s*(?P<au>k|mil)?", re.IGNORECASE)
+_SINGLE_RE = re.compile(
+    _CURRENCY_PREFIX + r"(?P<a>\d[\d.,]*)\s*(?P<au>k|mil)?", re.IGNORECASE
+)
 
 #: Words that mark a number as money talk even when the amount is small.
 _BUDGET_CONTEXT_KEYWORDS: tuple[str, ...] = (
@@ -351,10 +362,22 @@ def _extract_must_haves(text: str, normalized_text: str) -> tuple[str, ...] | No
         if not remainder:
             continue
         items = re.split(r",|\by\b", remainder)
-        cleaned = tuple(item.strip(" .") for item in items if item.strip(" ."))
+        cleaned = _dedupe_case_insensitive(item.strip(" .") for item in items if item.strip(" ."))
         if cleaned:
             return cleaned
     return None
+
+
+def _dedupe_case_insensitive(items: Iterable[str]) -> tuple[str, ...]:
+    """Order-preserving, case/whitespace-insensitive dedup: keeps the first
+    casing seen for each distinct requirement (e.g. "cochera" and "Cochera"
+    in the same message collapse to one entry)."""
+    seen: dict[str, str] = {}
+    for item in items:
+        key = _normalize(item).strip()
+        if key not in seen:
+            seen[key] = item
+    return tuple(seen.values())
 
 
 async def extract_timeline_and_must_haves(
