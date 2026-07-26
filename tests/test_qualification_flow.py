@@ -9,6 +9,7 @@ from app.modules.lead_qualification.application.profile_capture import (
     BuyerProfileCaptureService,
 )
 from app.modules.lead_qualification.application.qualification_flow import (
+    _REPROMPT_BUDGET,
     extract_budget,
     extract_financing_and_decision_mode,
     extract_locations,
@@ -80,6 +81,60 @@ async def test_extract_budget_no_signal(session_factory, seeded_lead, org_id):
     assert result is None
 
 
+async def test_extract_budget_single_amount_with_currency_word(
+    session_factory, seeded_lead, org_id
+):
+    async with session_factory() as session:
+        result = await extract_budget(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Tengo un presupuesto de 150000 dolares",
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.budget == MoneyRange(minimum=150000.0, maximum=150000.0)
+
+
+async def test_extract_budget_range_with_currency_symbol(session_factory, seeded_lead, org_id):
+    async with session_factory() as session:
+        result = await extract_budget(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Mi presupuesto es entre $100,000 y $150,000",
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.budget == MoneyRange(minimum=100000.0, maximum=150000.0)
+
+
+async def test_extract_budget_range_with_soles_symbol(session_factory, seeded_lead, org_id):
+    async with session_factory() as session:
+        result = await extract_budget(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Cuento con S/ 200,000 soles disponibles para la compra",
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.budget == MoneyRange(minimum=200000.0, maximum=200000.0)
+
+
+async def test_extract_budget_invalid_amount_reprompts_instead_of_raising(
+    session_factory, seeded_lead, org_id
+):
+    async with session_factory() as session:
+        result = await extract_budget(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Mi presupuesto es 0",
+        )
+    assert result == _REPROMPT_BUDGET
+
+
 # --- locations (US-203) -------------------------------------------------
 
 
@@ -148,6 +203,24 @@ async def test_extract_property_type_no_signal(session_factory, seeded_lead, org
     assert result is None
 
 
+async def test_extract_property_type_ambiguous_message_captures_first_mention(
+    session_factory, seeded_lead, org_id
+):
+    """'casa o departamento, lo que salga primero' — the DoD leaves ambiguous
+    two-type messages to the 'first mention wins' rule already implemented,
+    documented here with a second phrasing distinct from the happy-path test
+    above (which mentions type twice, not two different types)."""
+    async with session_factory() as session:
+        result = await extract_property_type(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="casa o departamento, lo que salga primero",
+        )
+    assert isinstance(result, ProfilePatch)
+    assert result.property_type is PropertyType.HOUSE
+
+
 # --- timeline / must_haves (US-205) -------------------------------------
 
 
@@ -176,6 +249,57 @@ async def test_extract_timeline_and_must_haves_no_signal(session_factory, seeded
             text="Hola, buenas tardes",
         )
     assert result is None
+
+
+async def test_must_haves_deduplicates_within_one_message(session_factory, seeded_lead, org_id):
+    async with session_factory() as session:
+        result = await extract_timeline_and_must_haves(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Es indispensable que tenga cochera, Cochera y balcón",
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.must_haves == ("cochera", "balcón")
+
+
+async def test_timeline_and_must_haves_persist_independently_across_turns(
+    session_factory, seeded_lead, org_id
+):
+    """US-205 DoD: timeline/must_haves each captured in a separate turn must
+    not erase the other — complements
+    test_none_field_never_erases_previously_captured_value, which covers
+    cross-dimension (locations vs. timeline), by covering the two fields this
+    HU itself owns."""
+    async with session_factory() as session:
+        first = await extract_timeline_and_must_haves(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Es indispensable que tenga cochera",
+        )
+        await session.commit()
+    assert isinstance(first, ProfilePatch)
+    assert first.must_haves == ("cochera",)
+    assert first.timeline is None
+
+    async with session_factory() as session:
+        second = await extract_timeline_and_must_haves(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Quiero comprar en 6 meses",
+        )
+        await session.commit()
+    assert isinstance(second, ProfilePatch)
+    assert second.timeline is Timeline.SIX_MONTHS
+    assert second.must_haves is None
+
+    async with session_factory() as session:
+        profile = await BuyerProfileRepository(session).get_by_lead_id(seeded_lead)
+    assert profile.timeline is Timeline.SIX_MONTHS
+    assert profile.must_haves == ("cochera",)
 
 
 async def test_none_field_never_erases_previously_captured_value(
