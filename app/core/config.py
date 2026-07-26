@@ -41,9 +41,18 @@ class Settings(BaseSettings):
     crm_staleness_threshold_seconds: int = 60  # QA-13 staleness bound
     profile_completeness_threshold: float = 90.0  # QA-14 gate, percent
 
-    # Event bus / outbox worker
+    # Event bus / outbox worker. G12 (docs/e2e-manual-chat-checklist.md): a
+    # handler that fails on every delivery must not be retried every poll
+    # interval forever — that burned the Gemini quota on 2026-07-23 (a schema
+    # bug made every MessageReceived retry re-call the LLM, ~1 req/sec until
+    # fixed). Exponential backoff between attempts, dead-letter after the
+    # ceiling (row stays with `dead_lettered_at` + `last_error` set for manual
+    # inspection instead of processing it forever).
     outbox_poll_interval_seconds: float = 1.0
     outbox_batch_size: int = 50
+    outbox_max_attempts: int = 8
+    outbox_retry_backoff_base_seconds: float = 2.0
+    outbox_retry_backoff_max_seconds: float = 300.0
 
     # Conversation dormancy decay (per-stage/org-configurable thresholds arrive
     # with the Engagement module; this is the platform default).
@@ -57,6 +66,12 @@ class Settings(BaseSettings):
     recommendation_semantic_top_n: int = 10
     recommendation_top_k: int = 3
     recommendation_enrichment_timeout_ms: int = 3000
+
+    # US-307: Google Maps API key for Neighborhood Enrichment (Places Nearby
+    # Search). Same optional-credential convention as gemini_api_key/
+    # groq_api_key: unset means the adapter skips the HTTP call entirely and
+    # every property degrades to neighborhood=None, no network calls, no crash.
+    google_maps_api_key: str | None = None
 
     # US-308: real embedding model (Gemini gemini-embedding-001, truncated to
     # 1536 dims for the vector(1536) column + HNSW index). When unset,
@@ -77,6 +92,14 @@ class Settings(BaseSettings):
     # configured provider — swapping providers means a new ChatModelPort
     # adapter, not code changes upstream.
     conversation_llm_model: str = "gemini-2.5-flash"
+
+    # G4 fallback provider: when set, Groq's OpenAI-compatible chat API backs
+    # a second `ChatModelPort` the brain falls through to if Gemini raises
+    # (quota, outage, transient 5xx) — tried before ever degrading to
+    # TemplateBrain. Optional; with it unset, Gemini alone is the LLM path
+    # (unchanged behavior).
+    groq_api_key: str | None = None
+    groq_conversation_llm_model: str = "llama-3.3-70b-versatile"
 
     otel_service_name: str = "lead-to-sales-system"
     otel_exporter_otlp_endpoint: str | None = None

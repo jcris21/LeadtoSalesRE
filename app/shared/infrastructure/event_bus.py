@@ -11,7 +11,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,10 +80,16 @@ class EventBusWorker:
         self._running = False
 
     async def _drain_batch(self, batch_size: int) -> int:
+        now = datetime.now(UTC)
         async with session_scope() as session:
             result = await session.execute(
                 select(OutboxEventORM)
                 .where(OutboxEventORM.processed_at.is_(None))
+                .where(OutboxEventORM.dead_lettered_at.is_(None))
+                .where(
+                    (OutboxEventORM.next_attempt_at.is_(None))
+                    | (OutboxEventORM.next_attempt_at <= now)
+                )
                 .order_by(OutboxEventORM.occurred_at)
                 .limit(batch_size)
                 .with_for_update(skip_locked=True)
@@ -94,8 +100,6 @@ class EventBusWorker:
             return len(rows)
 
     async def _dispatch_row(self, session: AsyncSession, row: OutboxEventORM) -> None:
-        from datetime import datetime
-
         handlers = self._handlers.get(row.event_type, [])
         for consumer_name, handler in handlers:
             already_done = await session.get(InboxRecordORM, (consumer_name, row.event_id))
@@ -113,12 +117,36 @@ class EventBusWorker:
             except Exception as exc:  # noqa: BLE001 - contained per-handler, not fatal to the worker
                 row.attempts += 1
                 row.last_error = f"{consumer_name}: {exc}"
-                logger.exception(
-                    "Event handler failed",
-                    extra={"consumer": consumer_name, "event_id": str(row.event_id)},
-                )
-                return  # leave row unprocessed; retried next poll
+                settings = get_settings()
+                if row.attempts >= settings.outbox_max_attempts:
+                    row.dead_lettered_at = datetime.now(UTC)
+                    logger.error(
+                        "Event handler failed repeatedly; dead-lettering row "
+                        "(consumer=%s, event_id=%s, attempts=%d)",
+                        consumer_name,
+                        row.event_id,
+                        row.attempts,
+                    )
+                else:
+                    row.next_attempt_at = datetime.now(UTC) + _backoff_delay(
+                        row.attempts, settings
+                    )
+                    logger.exception(
+                        "Event handler failed",
+                        extra={"consumer": consumer_name, "event_id": str(row.event_id)},
+                    )
+                return  # leave row unprocessed; retried at next_attempt_at (or dead-lettered)
         row.processed_at = datetime.now(UTC)
+
+
+def _backoff_delay(attempts: int, settings) -> timedelta:
+    """Exponential backoff: base * 2**(attempts-1), capped at the configured
+    ceiling. `attempts` is already incremented for this failure (>= 1)."""
+    seconds = min(
+        settings.outbox_retry_backoff_base_seconds * (2 ** (attempts - 1)),
+        settings.outbox_retry_backoff_max_seconds,
+    )
+    return timedelta(seconds=seconds)
 
 
 event_bus = EventBusWorker()

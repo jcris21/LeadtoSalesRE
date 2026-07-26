@@ -52,6 +52,7 @@ from app.modules.recommendation.infrastructure.maps_client import GoogleMapsClie
 from app.modules.recommendation.infrastructure.repository import (
     PropertyRepository,
     RecommendationRepository,
+    SqlPropertyLocationLookup,
 )
 from app.shared.infrastructure import event_bus
 from app.shared.infrastructure.event_bus import EventBusWorker
@@ -68,15 +69,20 @@ def _get_enrichment_adapter() -> NeighborhoodEnrichmentAdapter:
     NeighborhoodEnrichmentAdapter's fire-and-forget background retries
     (§7.12) must outlive any single handler invocation, so the underlying
     http client can't be a per-call context manager (it would close under
-    the in-flight retry). No Google Maps API key is wired yet (out of scope
-    until Sprint 3B gets credentials) — until then every real call fails
-    fast and the adapter's own timeout/fallback degrades gracefully to
-    `neighborhood=None`, which is the documented, expected behaviour.
+    the in-flight retry). US-307: `google_maps_api_key` is optional — when
+    unset, `GoogleMapsClient.nearby` raises `MapsNotConfiguredError` before
+    ever making a request, and the adapter's own fallback degrades
+    gracefully to `neighborhood=None`, which is the documented, expected
+    behaviour in keyless dev/test environments.
     """
     global _enrichment_adapter
     if _enrichment_adapter is None:
+        settings = get_settings()
         _enrichment_adapter = NeighborhoodEnrichmentAdapter(
-            GoogleMapsClient(httpx.AsyncClient())
+            GoogleMapsClient(
+                httpx.AsyncClient(), api_key=settings.google_maps_api_key or ""
+            ),
+            location_lookup=SqlPropertyLocationLookup(get_session_factory()),
         )
     return _enrichment_adapter
 

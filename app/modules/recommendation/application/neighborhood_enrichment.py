@@ -24,7 +24,8 @@ import uuid
 
 from app.core.database import get_session_factory
 from app.modules.recommendation.domain.models import NeighborhoodEnriched, NeighborhoodInsight
-from app.modules.recommendation.infrastructure.maps_client import MapsClient
+from app.modules.recommendation.domain.ports import PropertyLocationPort
+from app.modules.recommendation.infrastructure.maps_client import MapsClient, MapsNotConfiguredError
 from app.shared.infrastructure.event_bus import publish
 
 logger = logging.getLogger(__name__)
@@ -36,21 +37,29 @@ _DEFAULT_MAX_RETRIES = 1
 class NeighborhoodEnrichmentAdapter:
     """`NeighborhoodEnrichmentPort` implementation backed by a `MapsClient`.
 
-    Note on `zone`: the port contract (`domain/ports.py`, not modifiable here)
-    only carries `property_id`s, not each property's zone — resolving a
-    property to its zone is out of scope for this sprint, so the Maps lookup
-    is keyed by the property id itself. Wiring a real zone lookup is a
-    follow-up once a `Property` repository is passed in here.
+    Note on `zone` (US-307): the port contract (`domain/ports.py`) only
+    carries `property_id`s, not each property's zone/address, so real
+    location resolution happens here via an injected `PropertyLocationPort`
+    rather than by widening the port. When no lookup is wired (the default),
+    the Maps call is keyed by the property id itself — the pre-US-307
+    placeholder behaviour every `FakeMapsClient`-based test still relies on.
     """
 
     def __init__(
         self,
         client: MapsClient,
         *,
+        location_lookup: PropertyLocationPort | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
         retry_timeout_ms: int = _DEFAULT_RETRY_TIMEOUT_MS,
     ) -> None:
         self._client = client
+        # US-307: when unset (the default, and what every existing
+        # `FakeMapsClient`-based test passes), the adapter falls back to its
+        # original behaviour of keying the lookup by `property_id` itself.
+        # Real wiring passes a `PropertyLocationPort` so the Maps call gets
+        # the property's actual zone/address instead.
+        self._location_lookup = location_lookup
         self._max_retries = max_retries
         self._retry_timeout_ms = retry_timeout_ms
         # Fire-and-forget background retries must be kept alive somewhere or
@@ -58,6 +67,14 @@ class NeighborhoodEnrichmentAdapter:
         # asyncio footgun) — this set is that anchor. Tasks remove themselves
         # via `add_done_callback` once finished, success or failure.
         self._background_tasks: set[asyncio.Task[None]] = set()
+
+    async def _resolve_location(self, property_id: uuid.UUID) -> str | None:
+        """US-307: real location when a lookup is wired, else the pre-US-307
+        placeholder (`property_id` itself) — keeps every `FakeMapsClient`
+        test that never passes `location_lookup` behaving exactly as before."""
+        if self._location_lookup is None:
+            return str(property_id)
+        return await self._location_lookup.location_for(property_id)
 
     async def enrich_top3(
         self, *, lead_id: uuid.UUID, property_ids: list[uuid.UUID], timeout_ms: int
@@ -67,23 +84,41 @@ class NeighborhoodEnrichmentAdapter:
         Each lookup is wrapped in its own try/except so one property's
         timeout or hard failure can never block or fail its siblings (§7.12).
         A per-property timeout also triggers a bounded, non-blocking
-        background retry (see `_schedule_retry`).
+        background retry (see `_schedule_retry`). A property with no
+        resolvable location (US-307) is skipped before any Maps call.
         """
         timeout_s = timeout_ms / 1000
 
         async def fetch_one(property_id: uuid.UUID) -> tuple[uuid.UUID, NeighborhoodInsight | None]:
+            location = await self._resolve_location(property_id)
+            if location is None:
+                logger.info(
+                    "Neighborhood enrichment skipped for property %s; "
+                    "no resolvable location on record",
+                    property_id,
+                )
+                return property_id, None
             try:
                 nearby_places = await asyncio.wait_for(
-                    self._client.nearby(zone=str(property_id), property_id=property_id),
+                    self._client.nearby(zone=location, property_id=property_id),
                     timeout=timeout_s,
                 )
+            except MapsNotConfiguredError:
+                # US-307: a config gap, not a transient failure — no point
+                # scheduling a retry that will fail the same way every time.
+                logger.info(
+                    "Neighborhood enrichment skipped for property %s; "
+                    "no Google Maps API key configured",
+                    property_id,
+                )
+                return property_id, None
             except Exception:  # noqa: BLE001 - timeout or Maps failure, both handled the same way
                 logger.info(
                     "Neighborhood enrichment missed budget for property %s; "
                     "returning partial fallback and scheduling background retry",
                     property_id,
                 )
-                self._schedule_retry(lead_id=lead_id, property_id=property_id)
+                self._schedule_retry(lead_id=lead_id, property_id=property_id, location=location)
                 return property_id, None
             return property_id, NeighborhoodInsight(
                 property_id=property_id, nearby_places=nearby_places, partial=False
@@ -92,21 +127,27 @@ class NeighborhoodEnrichmentAdapter:
         pairs = await asyncio.gather(*(fetch_one(property_id) for property_id in property_ids))
         return dict(pairs)
 
-    def _schedule_retry(self, *, lead_id: uuid.UUID, property_id: uuid.UUID) -> None:
+    def _schedule_retry(
+        self, *, lead_id: uuid.UUID, property_id: uuid.UUID, location: str
+    ) -> None:
         """Kicks off the §7.12 background retry without awaiting it.
 
         This runs "fuera del camino crítico": the caller (and the request
         that triggered `enrich_top3`) must never wait on it. The task
         reference is stashed in `self._background_tasks` so it survives past
         the end of `enrich_top3`, and removed once it finishes either way.
+        `location` is the same resolved value `fetch_one` already had — no
+        point re-resolving it for a retry of the same property.
         """
         task = asyncio.create_task(
-            self._retry_and_publish(lead_id=lead_id, property_id=property_id)
+            self._retry_and_publish(lead_id=lead_id, property_id=property_id, location=location)
         )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _retry_and_publish(self, *, lead_id: uuid.UUID, property_id: uuid.UUID) -> None:
+    async def _retry_and_publish(
+        self, *, lead_id: uuid.UUID, property_id: uuid.UUID, location: str
+    ) -> None:
         """Retries the Maps lookup a bounded number of times, off the request
         path. Retries are capped (default: 1) because this is a best-effort
         enrichment, not a critical operation — an unbounded retry loop would
@@ -118,7 +159,7 @@ class NeighborhoodEnrichmentAdapter:
         for attempt in range(1, self._max_retries + 1):
             try:
                 nearby_places = await asyncio.wait_for(
-                    self._client.nearby(zone=str(property_id), property_id=property_id),
+                    self._client.nearby(zone=location, property_id=property_id),
                     timeout=self._retry_timeout_ms / 1000,
                 )
             except Exception:  # noqa: BLE001 - keep retrying up to the bound, then give up

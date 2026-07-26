@@ -110,11 +110,20 @@ async def trace_decision(
     start = time.monotonic()
     recorder = DecisionTraceRecorder()
     with _tracer.start_as_current_span(f"ai_decision.{agent_name}") as span:
-        async with langsmith_trace(f"ai_decision.{agent_name}", run_type="chain"):
+        async with langsmith_trace(
+            f"ai_decision.{agent_name}",
+            run_type="chain",
+            inputs={
+                "agent_name": agent_name,
+                "organization_id": str(organization_id),
+                "conversation_id": str(conversation_id) if conversation_id else None,
+            },
+        ) as run:
             try:
                 yield recorder
             finally:
                 latency_ms = int((time.monotonic() - start) * 1000)
+                run.end(outputs=recorder.output)
                 span.set_attribute("organization_id", str(organization_id))
                 span.set_attribute("agent_name", agent_name)
                 span.set_attribute("latency_ms", latency_ms)

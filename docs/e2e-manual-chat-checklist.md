@@ -54,7 +54,7 @@ ver workaround de observación en §5.
 | G2 | ✅ **CERRADO (2026-07-17).** El wiring inyecta `build_profile_query_embedder(gemini_api_key)`: el BuyerProfile se embebe con el mismo modelo que el corpus (`gemini-embedding-001`, task `RETRIEVAL_QUERY`, 1536 dims normalizados). Además `SemanticRetrievalService` tiene sonda de dimensiones: ante mismatch NO toca el SQL pgvector y cae al ranking in-memory (`tests/test_query_embedding.py`). | ✅ Resuelto | El pipeline de recomendación llega a `semantic_search` con dims compatibles; sin key, degrada al fallback in-memory sin crash. |
 | G3 | ✅ **CERRADO (2026-07-17).** `GEMINI_API_KEY` en `.env` y seed ejecutado: `scripts/seed_recommendation_demo.py` dejó las 6 propiedades demo con embeddings reales de 1536 dims (verificado `vector_dims=1536` en las 6). El seed aborta explícitamente si falta la key (el fallback hash de 16 dims no cabe en `vector(1536)`). | ✅ Resuelto | Re-runs son idempotentes (gate por `source_hash`): solo re-embebe lo que cambió. Nota de entorno: la salida TLS pasa por el almacén de certificados del OS (`truststore`, inyectado en `app/main.py` y el seed) — necesario en esta máquina por interceptación TLS del antivirus. |
 | G4 | ✅ **CERRADO (2026-07-18).** LLM conversacional conectado detrás de `ConversationBrain` de forma **agnóstica al proveedor**: `LLMConversationBrain` habla con un `ChatModelPort` neutral (`conversation_ownership/infrastructure/llm_brain.py`); el único código provider-aware es el adaptador (`GeminiChatModel`, reusa `GEMINI_API_KEY`, modelo en `CONVERSATION_LLM_MODEL`, default `gemini-2.5-flash`). Sin key o ante fallo del modelo, degrada a `TemplateBrain` (los templates quedan como hook futuro para saludos/keywords por broker). System prompt transversal de prueba en `domain/prompts.py` (fallback; un prompt activo del Prompt Registry por org siempre gana). Medición: cada turno loguea `conversation_brain_turn source=llm\|template_fallback model=... latency_ms=... history_turns=...` y la respuesta queda en el decision trace. Cubierto por `tests/test_llm_conversation_brain.py`. | ✅ Resuelto | La prueba ahora valida pipeline **y** inteligencia conversacional: latencia/fallback-rate desde logs, calidad desde el decision trace. |
-| G5 | **Entrega de respuesta exige `OrganizationConfig.chatwoot`.** Sin config, `handle_response_ready` descarta el mensaje (solo log de error). | 🟠 Alto | Opción A: levantar Chatwoot local (docker-compose) y configurar la org. Opción B (recomendada para esta prueba): leer las respuestas directamente de `outbox_events` (§5). |
+| G5 | **Entrega de respuesta exige `OrganizationConfig.chatwoot`.** Sin config, `handle_response_ready` descarta el mensaje (solo log de error). | 🟠 Alto | **Opción A (recomendada, ver §5):** levantar Chatwoot local (docker-compose) y configurar la org — la respuesta llega a la UI real de Chatwoot, no solo a la terminal. Opción B (fallback de debug si Chatwoot no está disponible): leer las respuestas directamente de `outbox_events` (§5, al final). |
 | G6 | ✅ **CERRADO para la prueba (2026-07-17).** `properties` y `property_embeddings` ya no están vacías: `scripts/seed_recommendation_demo.py` (§4) siembra el catálogo demo (con `link_references` reales) + embeddings vía las primitivas del repo. Sigue sin haber trigger de ingesta en producción — pendiente para una épica posterior, no bloquea el E2E. | ✅ Resuelto (para E2E) | Re-ejecutable en cualquier momento; idempotente. |
 | G7 | ✅ **CERRADO (2026-07-18).** Mismatch de zonas resuelto en ambos lados: los seeds del E2E ya usaban distritos de Lima (§4, `_KNOWN_ZONES`), y ahora `MockInventorySource` también fue realineado a Lima (Palermo→Miraflores, Recoleta→San Isidro, Belgrano→Surco, Villa Crespo→Barranco) con comentario que ancla el catálogo a `_KNOWN_ZONES`. Los tests de ingesta solo dependen del tamaño del catálogo (10), no de las zonas. | ✅ Resuelto | El filtro estructurado por zona nunca devuelve 0 candidatos por mismatch de ciudad, ni con el seed demo ni con el mock de ingesta. |
 | G8 | ✅ **CERRADO (2026-07-19).** Los leads ahora nacen desde el chat: mientras la conversación no tiene Lead vinculado, el Coordinator responde pidiendo el nombre (`REPROMPT_IDENTITY`); el primer mensaje con nombre (extractor determinístico `identity_extraction.py`: "me llamo …"/"soy …"/nombre a secas, DNI opcional de 8 dígitos) crea el deal en wacrm (`WacrmClient.create_lead`, stage `New`, teléfono = `contact_reference`) vía `LeadSyncAdapter.create_lead` con **espejo local inmediato** en la misma transacción — sin esperar el poll CDC; el siguiente poll converge idempotente sobre la misma fila. Si ya existe un lead local con ese teléfono se vincula sin duplicar; si wacrm falla, se re-pregunta y se reintenta al siguiente turno. Cubierto por `tests/test_coordinator_identity_gate.py`, `tests/test_identity_extraction.py` y los tests de adapter/cliente. **Addendum 2026-07-19:** el fork real de wacrm no tenía creación de deals por API — se añadió `POST /api/v1/deals` (scope `deals:write`, idempotente por teléfono: reutiliza el deal abierto del contacto) y el `contact_dni` se registra en `deals.notes` (`DNI: XXXXXXXX`), visible en el apartado Notes del deal card. | ✅ Resuelto | El guion ya no requiere pre-crear el lead: el paso inicial del chat es dejar el nombre (mensaje de bienvenida G8) y el lead aparece en `leads` en ese mismo turno. |
@@ -82,7 +82,7 @@ la única limitación aceptada de esta prueba.
 - [x] Migraciones al día: `alembic upgrade head` (14 revisiones — incluye pgvector + HNSW y la 0014 `estado` enum→varchar; aplicadas 2026-07-17).
 - [ ] App corriendo: `uvicorn app.main:app --port 8000` — el worker de outbox, el decay loop y el `crm_sync_loop` arrancan con el lifespan.
 - [ ] wacrm accesible: instancia real local (`:3005`) con CrmConfig de la org, o mock (`mocks/wacrm_mock`, `:8080`).
-- [ ] (Opción A de G5) Chatwoot local levantado vía `docker-compose` + `OrganizationConfig.chatwoot` completo (inbox_id, account_id, api_access_token, base_url).
+- [ ] Chatwoot local levantado vía `docker-compose` + `OrganizationConfig.chatwoot` completo (inbox_id, account_id, api_access_token, base_url) — ver guía paso a paso en §5.
 
 ### Datos base
 - [ ] Organización creada (tabla `organizations`) — anotar `ORG_ID`.
@@ -177,9 +177,83 @@ excluida del ranking semántico por el INNER JOIN):**
 
 ---
 
-## 5. Cómo observar la respuesta del agente (sin Chatwoot)
+## 5. Cómo recibir la respuesta del agente — en Chatwoot, no en la terminal
 
-Cada respuesta (conversacional o Top-3) queda como evento `ResponseReady` en el outbox:
+La respuesta del agente (conversacional o Top-3) se publica como evento `ResponseReady`
+en el outbox, y el worker la envía con `ChatwootClient.send_message` **solo si** la
+organización tiene `OrganizationConfig.chatwoot` configurado *y* el `conversation.id`
+del payload de entrada es una conversación **real** que existe en esa instancia de
+Chatwoot — el backend no valida ese id contra la API de Chatwoot al recibir el webhook,
+así que un id inventado (p. ej. `CW-DEMO-...`) nunca podrá recibir la respuesta ahí,
+por más que el pipeline interno funcione bien (de ahí el workaround histórico de leer
+`outbox_events` a mano, §5.2).
+
+### 5.1 Configurar la entrega real a Chatwoot (recomendado — Opción A de G5)
+
+1. **Levantar Chatwoot local:**
+   ```bash
+   docker compose up -d chatwoot_postgres chatwoot_redis chatwoot_rails chatwoot_sidekiq
+   ```
+   Espera a que migre (`docker compose logs -f chatwoot_rails` hasta ver el server
+   arriba) y entra a `http://localhost:3000` para crear la cuenta de super-admin y el
+   primer Account de Chatwoot.
+2. **Crear un inbox** (Settings → Inboxes → Add Inbox). Cualquier canal tipo API sirve
+   para esta prueba (no hace falta WhatsApp real). Anota:
+   - `account_id` (URL `/app/accounts/<account_id>/...`)
+   - `inbox_id` (URL del inbox o Settings → Inboxes → tu inbox → Configuration)
+3. **Generar el `api_access_token`**: perfil del agente (ícono abajo a la izquierda) →
+   Profile Settings → Access Token.
+4. **Guardar el config en la organización** (requiere el JWT de §3, admin ya logueado).
+   `base_url` es el host de Chatwoot **tal como lo ve el contenedor `app`** — si corres
+   todo con `docker compose up` (recomendado, el `app` service vive en la misma red que
+   `chatwoot_rails`), es el hostname interno del compose, **no** `localhost`:
+   ```bash
+   curl -s -X PUT "http://localhost:8000/api/v1/organizations/$ORG_ID/config" \
+     -H "Authorization: Bearer $JWT" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "chatwoot": {
+         "inbox_id": "<INBOX_ID>",
+         "account_id": "<ACCOUNT_ID>",
+         "api_access_token": "<ACCESS_TOKEN>",
+         "base_url": "http://chatwoot_rails:3000"
+       }
+     }'
+   ```
+   (Si en cambio corres la app con `uvicorn` directo en el host, fuera de docker, usa
+   `http://localhost:3000` en su lugar.)
+5. **Registrar el webhook de cuenta de Chatwoot hacia nuestra app** (una sola vez por
+   cuenta de Chatwoot) — sin esto, un mensaje creado en Chatwoot **nunca** llega a
+   nuestro backend, aunque el `OrganizationConfig.chatwoot` esté bien configurado (eso
+   solo habilita la salida agente→Chatwoot, no la entrada Chatwoot→agente):
+   ```bash
+   curl -s -X POST "http://localhost:3000/api/v1/accounts/<ACCOUNT_ID>/webhooks" \
+     -H "api_access_token: <ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "webhook": {
+         "url": "http://app:8000/api/v1/webhooks/chatwoot/'"$ORG_ID"'",
+         "subscriptions": ["message_created"]
+       }
+     }'
+   ```
+   Verificar con `GET /api/v1/accounts/<ACCOUNT_ID>/webhooks` (mismo header). Nota: la
+   URL usa `app:8000` (hostname del servicio `app` en el compose), no `localhost` — es
+   Chatwoot (dentro de docker) quien llama a nuestra app, no al revés.
+6. **Crear una conversación real** en el inbox (botón "New Conversation" en la UI, con
+   un contacto cuyo teléfono sea `+51999888777` — el mismo `--phone` del guion) y anota
+   el `id` numérico de esa conversación (URL `/app/accounts/<account_id>/conversations/<id>`).
+7. Usa ese `id` numérico como `conversation.id` del payload (§1) o como
+   `--conversation-id` del script (§8) — **no** el `CW-DEMO-...` que el script genera
+   por defecto. A partir de aquí, con el webhook de cuenta del paso 5 registrado, tanto
+   el mensaje del lead como la respuesta del agente aparecen en vivo en esa conversación
+   de Chatwoot — no hay que mirar la terminal ni la DB para nada.
+
+### 5.2 Fallback de debug (sin Chatwoot configurado)
+
+Si Chatwoot no está disponible, la respuesta igual queda en el outbox y se puede leer
+a mano — esto es solo para depurar el pipeline interno, no reemplaza la verificación
+real en Chatwoot:
 
 ```sql
 SELECT event_type,
@@ -192,9 +266,8 @@ LIMIT 5;
 ```
 
 > Nota: el worker consume la fila y `handle_response_ready` intentará enviarla a
-> Chatwoot; sin config solo se loguea `Organization … has no Chatwoot config`. La
-> consulta anterior es el visor oficial de esta prueba. Si el worker marca/borra filas
-> procesadas, consultar también los logs de la app.
+> Chatwoot; sin config solo se loguea `Organization … has no Chatwoot config`. Si el
+> worker marca/borra filas procesadas, consultar también los logs de la app.
 
 Estado de la conversación y del perfil en cualquier momento:
 
@@ -267,3 +340,98 @@ extracción sale del propio mensaje (keywords determinísticos; fallback LLM si 
 - [x] El mensaje Top-3 llegó a la UI de Chatwoot. ✅ **CERRADO (2026-07-20).** El signal `type_match` ya está traducido en `explanation_generator.py` (`_SIGNAL_PHRASES`). `_format_recommendation_message` (`recommendation/wiring.py`) ahora agrega dirección/zona/precio y `Enlaces:` (`property.link_references`) por cada propiedad, más un párrafo narrativo LLM (`llm_narrator.py`) que cierra preguntando cuál opción prefiere. Verificado re-disparando `handle_profile_completed` para el lead de este guion y confirmando en la API de Chatwoot (conversación `#2`, mensajes #42/#43) que el Top-3 entregado trae dirección + precio + link por propiedad — comparado contra el mensaje #41 (la corrida original, sin esos datos).
 - [ ] B1 transfiere a humano sin generar respuesta; C1 degrada el score; D1 responde el mensaje de vacío. *(Pendientes — escenarios B/C/D.)*
 - [x] Push a wacrm del stage calificado: deal `82ada42e…` en **`Qualified`** en el wacrm real *(verificado por API `GET /deals/{id}`)*.
+
+---
+
+## 8. Simulación on-demand (mensajes libres, en vivo)
+
+El guion de §6 es fijo (para regresión/reproducibilidad). Para **conversar libremente**
+— escribir cualquier texto como si fueras el lead, turno por turno, y ver la respuesta
+real del agente — usa `scripts/send_lead_message.py`. Envía el mensaje del lead
+**directo a Chatwoot**, no solo a nuestro webhook interno:
+
+- si el org tiene `OrganizationConfig.chatwoot` configurado (§5.1) y `--conversation-id`
+  es una conversación real, el script publica el texto del lead en esa conversación de
+  Chatwoot como mensaje **entrante** (agent API, `message_type: incoming`) — el account
+  webhook de Chatwoot (registrado en el paso 5 de §5.1) lo reenvía solo a nuestro
+  backend, exactamente como pasaría con un WhatsApp real. El script **no** llama también
+  a nuestro webhook a mano (se probó y duplicaba el evento — Chatwoot ya lo hace);
+- si el org no tiene Chatwoot configurado (o pasas `--skip-chatwoot`), cae al modo
+  anterior: solo llama a nuestro webhook interno con un `id` sintético (`MSG-0001`, …) —
+  útil para depurar el pipeline sin depender de Chatwoot;
+- si `--conversation-id` no es una conversación real, el script corta con un error claro
+  en vez de fallar en silencio 20s después (aprendido de la corrida real: un
+  `CW-DEMO-...` inventado nunca llega a Chatwoot, y antes solo se veía como reintentos
+  fallidos en `outbox_events`);
+- recuerda `org_id` / `conversation.id` / teléfono / nombre / `chatwoot_base_url` entre
+  llamadas en un archivo local `.e2e_chat_session.json` (gitignored) — no hay que
+  repetirlos en cada turno;
+- por defecto además hace poll a `outbox_events` (la consulta de §5.2) hasta 20s y ecoa
+  la respuesta en terminal — **solo como confirmación de debug**; la respuesta real la
+  vas a ver **en la UI de Chatwoot** al mismo tiempo. Para no depender de la terminal,
+  agrega `--no-wait` y verifica directo en Chatwoot.
+
+Requisitos: la app y Chatwoot corriendo (`docker compose up`, o `uvicorn` + Chatwoot
+aparte, checklist §3), `ORG_ID` de una organización ya creada, y — para que la
+respuesta llegue a Chatwoot y no solo al eco de terminal — el `OrganizationConfig.chatwoot`
+configurado, el account webhook registrado y una conversación real creada, los tres
+según §5.1. `--chatwoot-base-url` (default `http://localhost:3000`) es el host de
+Chatwoot **tal como lo ve este script** (normalmente el host, vía el puerto mapeado) —
+no confundir con el `base_url` guardado en `OrganizationConfig.chatwoot`, que es como lo
+ve el contenedor `app` (§5.1 paso 4).
+
+> Nota de este entorno: si `uv run` falla con `invalid peer certificate: UnknownIssuer`
+> (interceptación TLS del antivirus/corporativo, la misma que motivó `truststore` en
+> `app/main.py`), agrega `--native-tls`: `uv run --native-tls python scripts/...`.
+
+### Comandos — cópialos y reemplaza el texto entre comillas por lo que quieras decir
+
+**Turno 1, con Chatwoot configurado (recomendado, §5.1) — arranca apuntando a una
+conversación real que ya creaste en la UI de Chatwoot:**
+```bash
+uv run python scripts/send_lead_message.py --new --org-id <ORG_ID> \
+  --conversation-id <CHATWOOT_CONVERSATION_ID> --no-wait "Hola! buenas tardes"
+```
+org-demo-id: ed668289-8880-45a1-af80-3d2823bd6378
+
+**Turno 1, sin Chatwoot (solo simula el pipeline interno, §5.2)** — aquí sí puedes
+omitir `--conversation-id`, el script genera uno sintético:
+```bash
+uv run python scripts/send_lead_message.py --new --org-id <ORG_ID> --skip-chatwoot "Hola! buenas tardes"
+```
+
+**Turno 2 en adelante (ya no hace falta `--org-id` ni `--conversation-id`, quedaron guardados):**
+```bash
+uv run python scripts/send_lead_message.py "Estoy buscando un departamento para comprar"
+```
+```bash
+uv run python scripts/send_lead_message.py "Que tenga 2 dormitorios por favor"
+```
+```bash
+uv run python scripts/send_lead_message.py "Mi presupuesto es de 200 mil a 300 mil dolares"
+```
+… y así sucesivamente: cada llamada es un turno del lead, con **el texto que tú quieras**
+(no tiene que seguir el guion de §6 — esa es la idea de esta sección).
+
+**Arrancar una segunda conversación en paralelo (p. ej. para probar el Escenario B de §6)
+sin perder el estado de la primera** — necesita otra conversación real distinta creada en
+Chatwoot (no reutilices la 2, y no inventes un id: con Chatwoot configurado un
+`CW-DEMO-...` corta con error, §5.1):
+```bash
+uv run python scripts/send_lead_message.py --new --conversation-id <OTRO_ID_REAL> \
+  "Hola, quiero hablar con un asesor por favor"
+```
+
+**Enviar y no esperar el eco de terminal (la respuesta real la ves en Chatwoot):**
+```bash
+uv run python scripts/send_lead_message.py --no-wait "Hola"
+```
+
+**Otros flags disponibles:** `--phone`, `--name` (identidad del lead simulado, default
+`+51999888777` / `Lead Demo`), `--base-url` (default `http://localhost:8000`),
+`--chatwoot-base-url` (default `http://localhost:3000`), `--skip-chatwoot`. Ver
+`uv run python scripts/send_lead_message.py --help` para el detalle completo.
+
+Si prefieres el `curl` crudo en vez del script (más control, más tedioso con texto libre
+por el escapado de comillas), el payload es el mismo de §1 — solo cambia `content` e
+incrementa `id` en cada turno.

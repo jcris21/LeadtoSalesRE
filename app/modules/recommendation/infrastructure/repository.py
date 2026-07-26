@@ -7,8 +7,8 @@ from __future__ import annotations
 import uuid
 from datetime import UTC
 
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.modules.lead_qualification.domain.models import MoneyRange, PropertyType
 from app.modules.recommendation.domain.models import (
@@ -127,6 +127,51 @@ class PropertyRepository:
         result = await self._session.execute(query)
         return [self._to_domain(row) for row in result.scalars().all()]
 
+    async def count_available(
+        self, organization_id: uuid.UUID, *, zones: tuple[str, ...] = ()
+    ) -> int:
+        """Count of `estado="disponible"` properties, optionally narrowed to
+        `zones` — used to ground a zero-result conversational reply in a real
+        citywide (zones=()) or per-zone availability figure instead of the
+        LLM inventing one (see `application.search_diagnostics`)."""
+        query = (
+            select(func.count())
+            .select_from(PropertyORM)
+            .where(PropertyORM.organization_id == organization_id, PropertyORM.estado == "disponible")
+        )
+        if zones:
+            query = query.where(PropertyORM.zone.in_(zones))
+        result = await self._session.execute(query)
+        return result.scalar_one()
+
+    async def count_near_price(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        budget: MoneyRange,
+        zones: tuple[str, ...] = (),
+        tolerance: float = 0.20,
+    ) -> int:
+        """Count of `estado="disponible"` properties within `budget` widened
+        by `tolerance` on both ends — the "closer price" figure offered to a
+        lead whose exact budget matched nothing (US-hallucination-fix)."""
+        low = budget.minimum * (1 - tolerance)
+        high = budget.maximum * (1 + tolerance)
+        query = (
+            select(func.count())
+            .select_from(PropertyORM)
+            .where(
+                PropertyORM.organization_id == organization_id,
+                PropertyORM.estado == "disponible",
+                PropertyORM.price >= low,
+                PropertyORM.price <= high,
+            )
+        )
+        if zones:
+            query = query.where(PropertyORM.zone.in_(zones))
+        result = await self._session.execute(query)
+        return result.scalar_one()
+
     async def semantic_search(
         self,
         *,
@@ -197,6 +242,28 @@ class PropertyRepository:
             model_version=row.model_version,
             computed_at=_ensure_utc(row.computed_at),
         )
+
+
+class SqlPropertyLocationLookup:
+    """`PropertyLocationPort` backed by a fresh session per lookup (US-307).
+
+    Neighborhood enrichment's fan-out and its background retry both run
+    without a caller-owned session — the retry is fire-and-forget, outside
+    any request (see `NeighborhoodEnrichmentAdapter._publish_late_insight`,
+    which opens its own session the same way) — so this owns a short-lived
+    session per call rather than depending on state some other component
+    holds open.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def location_for(self, property_id: uuid.UUID) -> str | None:
+        async with self._session_factory() as session:
+            row = await session.get(PropertyORM, property_id)
+        if row is None:
+            return None
+        return row.name_address or row.zone or None
 
 
 def _neighborhood_snapshot(insight: NeighborhoodInsight | None) -> dict | None:

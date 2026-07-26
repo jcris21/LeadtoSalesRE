@@ -1,8 +1,8 @@
 # Lead-to-Visit WhatsApp Agent — Agentic System Design
 
-**Versión:** 1.1 · **Fecha diseño:** 2026-07-04 · **Fecha última verificación contra código:** 2026-07-20 · **Modo:** Diseño + Implementación · **Veredicto ARSDA:** 🟡 **4.15 — Scale with Caution** (ver §9)
+**Versión:** 1.2 · **Fecha diseño:** 2026-07-04 · **Fecha última verificación contra código:** 2026-07-25 · **Modo:** Diseño + Implementación · **Veredicto ARSDA:** 🟡 **4.15 — Scale with Caution** (ver §9)
 
-> §§0–11 describen el **diseño objetivo** (aspiracional, tal como se escribió el 2026-07-04). La **§12** documenta el **estado real verificado en código** (grafo LangGraph, tools, wiring) a 2026-07-20 — léela para saber qué de lo anterior ya existe y qué sigue siendo diseño a construir.
+> §§0–11 describen el **diseño objetivo** (aspiracional, tal como se escribió el 2026-07-04). La **§12** documenta el **estado real verificado en código** (grafo LangGraph, tools, wiring) a 2026-07-25 — léela para saber qué de lo anterior ya existe y qué sigue siendo diseño a construir.
 
 Sistema conversacional AI-first que convierte leads digitales de WhatsApp en visitas agendadas mediante conversación consultiva. Se diseña dentro de las constraints de ArchitecturalDrivers v0.2: Chatwoot (SoR conversaciones), wacrm (SoR leads), FastAPI + Supabase (dominio AI), monolito modular organization-ready.
 
@@ -283,13 +283,13 @@ Por cada decisión se traza (Gate 9): agente/nodo · prompt version · contexto 
 
 ---
 
-## 12. Estado Real de Implementación — Grafo LangGraph, Tools y Wiring (verificado 2026-07-20)
+## 12. Estado Real de Implementación — Grafo LangGraph, Tools y Wiring (verificado 2026-07-20, mapeo §12.4 re-verificado 2026-07-25)
 
 Esta sección refleja el código tal como existe hoy, no el diseño de §§1–11. Fuente: lectura directa de `app/modules/conversation_ownership/`, `app/modules/lead_qualification/`, `app/modules/recommendation/` y `app/main.py`.
 
 ### 12.1 El grafo LangGraph real
 
-El único `StateGraph` de todo el repo vive en `langgraph_responder.py`. Es deliberadamente mínimo — **un solo nodo**:
+El único `StateGraph` de todo el repo vive en `langgraph_responder.py`. Es deliberadamente mínimo — **un solo nodo**, sin edges condicionales, sin loops, sin `ToolNode`:
 
 ```mermaid
 flowchart LR
@@ -306,7 +306,70 @@ flowchart LR
 
 **State (`TurnState`, TypedDict):** `messages: list[dict] (acumulado por el checkpointer)` · `system_prompt: str` · `user_input: str` · `reply: str`.
 
-**Por qué solo un nodo:** el docstring del archivo es explícito — todo lo no conversacional (guardrail, ownership, FSM, calificación, persistencia) ya vive en servicios deterministas alrededor de `CoordinatorAgent`; el grafo existe casi exclusivamente por su **checkpointer** (historial de conversación resumible por `thread_id`), no por orquestación multi-nodo. No hay edges condicionales, no hay loops, no hay `ToolNode`.
+**Por qué solo un nodo:** el docstring del archivo es explícito — todo lo no conversacional (guardrail, ownership, FSM, calificación, persistencia) ya vive en servicios deterministas alrededor de `CoordinatorAgent`; el grafo existe casi exclusivamente por su **checkpointer** (historial de conversación resumible por `thread_id`), no por orquestación multi-nodo.
+
+#### 12.1.1 Detalle interno del nodo `respond` (única unidad de ejecución del grafo)
+
+El nodo `_respond_node` no es una caja negra: internamente ejecuta 4 pasos secuenciales sobre el `TurnState`. Este es el nivel de detalle que faltaba en el diagrama de arriba — lo que el grafo hace, campo por campo, en cada invocación:
+
+```mermaid
+flowchart TD
+  subgraph IN["Input al invoke() — por turno"]
+    S0["system_prompt: str\n(DEFAULT_SYSTEM_PROMPT o prompt\npor organización, cargado ANTES\nde entrar al grafo por CoordinatorAgent)"]
+    S1["user_input: str\n(texto del mensaje actual del lead)"]
+  end
+
+  subgraph CKPT["InMemorySaver — checkpoint por thread_id=conversation_id"]
+    H["messages: list[dict]\n(acumulado turno a turno vía\nAnnotated[..., operator.add])"]
+  end
+
+  IN --> N1
+  H -.estado previo.-> N1
+
+  subgraph NODE["nodo respond (_respond_node) — única unidad de ejecución"]
+    N1["1. Leer historial\nmessages[] desde el checkpoint"] --> N2["2. Append\n{role:'user', content:user_input}"]
+    N2 --> N3["3. brain.generate(\n  system_prompt, history, user_input)"]
+    N3 --> N4["4. Append\n{role:'assistant', content:reply}\n→ persiste en checkpoint"]
+  end
+
+  N3 -.llamada externa.-> BR{{"ConversationBrain\n(LLMConversationBrain → Gemini,\nfallback TemplateBrain)"}}
+  N4 --> OUT["reply: str\n(único campo que sale del grafo\nhacia CoordinatorAgent)"]
+
+  H -.escribe nuevo estado.-> H
+```
+
+**Lectura del diagrama:** el grafo no decide nada — no hay branching sobre el contenido del mensaje, no hay clasificación de intención, no hay selección de tool. Los 4 pasos son fijos y se ejecutan siempre en el mismo orden; lo único variable turno a turno es el contenido de `messages[]` que aporta el checkpointer. Esto es clave para entender el hallazgo de graphify (§12.4): la arista `AMBIGUOUS` entre "Intent Router" y "LangGraphResponder" existe porque ambos términos aparecen cerca en la prosa del diseño (§1, §2), pero el código confirma que **no hay relación de implementación** — el Intent Router nunca se construyó, y aunque existiera, no viviría dentro de este nodo (que es puramente de generación de texto, no de decisión).
+
+#### 12.1.2 Acumulación de estado a través de turnos (por qué el checkpointer es la única razón de usar LangGraph aquí)
+
+```mermaid
+sequenceDiagram
+  participant Lead as Lead (WhatsApp)
+  participant CO as CoordinatorAgent
+  participant G as LangGraph (nodo respond)
+  participant CP as InMemorySaver (thread_id=conv_id)
+  participant LLM as Gemini (LLMConversationBrain)
+
+  Lead->>CO: Turno 1: "Hola, vi el depa en Roma Norte"
+  CO->>G: invoke({system_prompt, user_input}, thread_id)
+  G->>CP: leer messages[] → [] (primer turno)
+  G->>LLM: generate(system_prompt, [], user_input)
+  LLM-->>G: reply_1
+  G->>CP: escribir messages += [user_1, assistant_1]
+  G-->>CO: reply_1
+  CO-->>Lead: envía reply_1 (vía ResponseReady → Chatwoot)
+
+  Lead->>CO: Turno 2: "¿Cuánto cuesta?"
+  CO->>G: invoke({system_prompt, user_input}, mismo thread_id)
+  G->>CP: leer messages[] → [user_1, assistant_1]
+  G->>LLM: generate(system_prompt, [user_1, assistant_1], user_input)
+  LLM-->>G: reply_2
+  G->>CP: escribir messages += [user_2, assistant_2]
+  G-->>CO: reply_2
+  CO-->>Lead: envía reply_2
+```
+
+**Consecuencia arquitectónica:** el grafo LangGraph en este sistema cumple exactamente una función — persistir y reinyectar `messages[]` por `thread_id` para que `ConversationBrain.generate()` tenga contexto conversacional sin que `CoordinatorAgent` tenga que gestionar el historial manualmente. Todo lo demás (guardrail, identidad, calificación, ownership, recomendación) ocurre **fuera** de esta invocación, como muestra §12.2.
 
 ### 12.2 Grafo de llamadas completo (Coordinator + event bus) — lo que realmente sustituye al "SAS multi-nodo" de §2
 
@@ -361,17 +424,20 @@ flowchart TD
 
 Lo que en §2 se modeló como "tool calls" del Coordinator (`get_lead`, `update_profile`, `search_properties`, `check_availability`, `propose_slots`, `book_visit`, `handoff`, `send_property_pack`, `register_offer`) hoy son **llamadas directas a servicios Python** desde `CoordinatorAgent` (no tools de un agente LLM) — el LLM nunca decide qué función invocar; el flujo es 100% determinista y el LLM solo redacta texto en 3 puntos puntuales.
 
-### 12.4 Mapeo diseño (§§1–2) → código real
+### 12.4 Mapeo diseño (§§1–2) → código real (actualizado 2026-07-25)
 
 | Componente del diseño | Artefacto real | Estado |
 |---|---|---|
 | Coordinator Agent | `coordinator.py::CoordinatorAgent` | Implementado, pero como orquestador determinista — el LLM solo vive dentro del nodo `respond` que invoca |
-| Intent Router | — | **No implementado.** El grafo tiene un solo nodo; no hay clasificación de intención explícita |
+| Intent Router | — | **No implementado.** El grafo tiene un solo nodo; no hay clasificación de intención explícita. (graphify flaggeó AMBIGUOUS la relación Intent Router↔LangGraphResponder — confirmado sin relación de implementación, ver §12.1.1) |
 | Objection Handler (+RAG) | `qualification_flow.py::extract_objection` + `LeadScoringService.record_objection` | Solo detección por keyword + efecto de scoring; no genera respuesta conversacional a la objeción, no hay RAG |
 | Matching Engine | `retrieval.py` (`StructuredFilterService` + `SemanticRetrievalService`) + `WeightedRankingEngine` | Implementado, pero vive en el pipeline event-driven de Recommendation, fuera del grafo/Coordinator |
-| Availability Validator | — | **No implementado.** No existe módulo de disponibilidad/citas |
-| Scheduling Service | — | **No implementado.** Módulo de Appointment referenciado en roadmap, sin código aún |
-| Ownership Policy Engine | `ownership_policy.py::OwnershipPolicyEngine` | Parcial — solo 2 de 10 escenarios de la matriz E14 (1 y 8); el resto lanza `NotImplementedPlaceholder` explícito |
+| **Availability Validator** | `app/modules/appointment/application/availability_validator.py::AvailabilityValidatorService` (US-402) | **Implementado** desde la última verificación (era "no implementado" a 2026-07-20). Servicio determinista puro (SQLAlchemy, sin LLM): `confirmed / pending / unavailable`; nunca inventa `confirmed` sin confirmación humana explícita (design.md Decision 2); idempotente frente a re-chequeos. **Sin cablear todavía**: ningún nodo del grafo ni `CoordinatorAgent` lo invoca — vive aislado con sus propios tests (`tests/test_availability_validator.py`) |
+| **Scheduling Service** | `app/modules/appointment/application/scheduling_service.py::SchedulingService.book_visit` (US-404) | **Implementado.** Re-valida disponibilidad internamente antes de reservar (design.md Decision 1 — nunca confía en un "ya confirmado" externo); crea evento real en Google Calendar (`google_calendar_client.py`, 191 líneas, no-stub); persiste `Appointment`; publica `AppointmentBooked`; sincroniza `PipelineStage.APPOINTMENT_SET` a wacrm. Recordatorios 24h/2h: **stub** (`NoOpReminderScheduler`, placeholder explícito de US-405, aún sin implementación real). **Sin cablear todavía**: no hay tool call, nodo de grafo ni handler de evento que lo invoque desde el flujo conversacional (`tests/test_scheduling_service.py` lo prueba de forma aislada) |
+| Reminder Scheduler (24h/2h) | `app/modules/appointment/application/reminder_port.py::NoOpReminderScheduler` | **Stub explícito**, no funcional — placeholder para US-405 |
+| Ownership Policy Engine | `ownership_policy.py::OwnershipPolicyEngine` | Sin cambios — parcial, solo 2 de 10 escenarios de la matriz E14 (1 y 8); el resto lanza `NotImplementedPlaceholder` explícito |
 | Guardrails Layer | `guardrail.py::GuardrailInterceptor` | Implementado como detector regex síncrono, corre antes que cualquier otra cosa en `handle_message` |
 
-**Consecuencia para §5 (Framework) y §9 (ARSDA):** la elección de LangGraph se justificó por checkpoints de estado persistentes y HITL — hoy el checkpointer sí se usa (historial por `thread_id`, `InMemorySaver`, swap a Postgres pendiente Sprint 8), pero el HITL de primera clase de LangGraph (`interrupt`) **no se usa**: el guardrail actúa fuera del grafo, antes de invocarlo. La arquitectura real es más cercana a "microservicios deterministas + 3 llamadas LLM puntuales coordinadas por event bus" que al SAS conversacional único descrito en §1.
+**Lo nuevo desde 2026-07-20:** apareció el módulo `app/modules/appointment/` completo (domain/application/infrastructure), cerrando dos de los tres huecos "no implementado" que señalaba esta tabla. `app/main.py` ya registra su ORM (`appointment_db_models`) en `Base.metadata`, pero el comentario en el propio código es explícito: *"no event wiring yet — US-402"*. Es decir: **Availability Validator y Scheduling Service existen como servicios deterministas completos y testeados, pero están desconectados del flujo end-to-end** — ni el grafo LangGraph (§12.1) ni `CoordinatorAgent.handle_message` (§12.2) los llaman todavía. El "wall" del diagrama de §12.2 sigue terminando en `LangGraphResponder.respond` / recomendación → `ResponseReady`; conectar `book_visit` requiere un paso de Coordinator adicional (o un nuevo handler de evento) que hoy no existe.
+
+**Consecuencia para §5 (Framework) y §9 (ARSDA):** la elección de LangGraph se justificó por checkpoints de estado persistentes y HITL — hoy el checkpointer sí se usa (historial por `thread_id`, `InMemorySaver`, swap a Postgres pendiente Sprint 8), pero el HITL de primera clase de LangGraph (`interrupt`) **no se usa**: el guardrail actúa fuera del grafo, antes de invocarlo. La arquitectura real es más cercana a "microservicios deterministas + 3 llamadas LLM puntuales coordinadas por event bus" que al SAS conversacional único descrito en §1 — y esa tendencia se refuerza con Availability/Scheduling: se construyeron como servicios aislados y probados primero, exactamente el patrón "capacidad extraída como servicio determinista" de §1, pendientes solo de integración.

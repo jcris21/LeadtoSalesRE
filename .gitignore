@@ -25,3 +25,6 @@ scripts/bin/harness-cli.exe
 
 # Local git worktrees for isolated feature work
 .worktrees/
+
+# scripts/send_lead_message.py session state (per-operator, local-only)
+.e2e_chat_session.json

@@ -21,7 +21,9 @@ from app.modules.conversation_ownership.application.langgraph_responder import (
 )
 from app.modules.conversation_ownership.infrastructure.llm_brain import (
     ChatModelError,
+    FallbackChatModel,
     GeminiChatModel,
+    GroqChatModel,
     LLMConversationBrain,
     build_conversation_brain,
 )
@@ -95,6 +97,21 @@ def test_build_conversation_brain_is_config_driven():
     assert isinstance(build_conversation_brain("test-key", "any-model"), LLMConversationBrain)
 
 
+def test_build_conversation_brain_with_only_groq_key_uses_groq_directly():
+    brain = build_conversation_brain(None, "any-model", groq_api_key="groq-key")
+    assert isinstance(brain, LLMConversationBrain)
+    assert isinstance(brain._chat_model, GroqChatModel)
+
+
+def test_build_conversation_brain_with_both_keys_chains_gemini_then_groq():
+    brain = build_conversation_brain(
+        "gemini-key", "gemini-model", groq_api_key="groq-key", groq_model="groq-model"
+    )
+    assert isinstance(brain, LLMConversationBrain)
+    assert isinstance(brain._chat_model, FallbackChatModel)
+    assert brain._chat_model.label == "gemini-model"
+
+
 async def test_responder_graph_feeds_checkpointed_history_to_llm_brain():
     chat_model = FakeChatModel()
     responder = LangGraphResponder(brain=LLMConversationBrain(chat_model))
@@ -159,6 +176,94 @@ async def test_gemini_adapter_raises_chat_model_error_on_terminal_http_failure()
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     model = GeminiChatModel("test-key", "test-model", client)
+
+    with pytest.raises(ChatModelError):
+        await model.complete(
+            system_prompt=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": "hola"}],
+        )
+
+
+async def test_fallback_chat_model_uses_primary_when_it_succeeds():
+    primary = FakeChatModel(reply="respuesta gemini")
+    primary.label = "gemini-model"
+    secondary = FakeChatModel(reply="respuesta groq")
+    secondary.label = "groq-model"
+    fallback = FallbackChatModel(primary, secondary)
+
+    reply = await fallback.complete(
+        system_prompt=SYSTEM_PROMPT, messages=[{"role": "user", "content": "hola"}]
+    )
+
+    assert reply == "respuesta gemini"
+    assert fallback.label == "gemini-model"
+    assert secondary.calls == []
+
+
+async def test_fallback_chat_model_falls_through_to_secondary_on_primary_failure():
+    secondary = FakeChatModel(reply="respuesta groq")
+    secondary.label = "groq-model"
+    fallback = FallbackChatModel(FailingChatModel(), secondary)
+
+    reply = await fallback.complete(
+        system_prompt=SYSTEM_PROMPT, messages=[{"role": "user", "content": "hola"}]
+    )
+
+    assert reply == "respuesta groq"
+    assert fallback.label == "groq-model"
+
+
+async def test_brain_only_degrades_to_template_after_both_providers_fail():
+    brain = LLMConversationBrain(FallbackChatModel(FailingChatModel(), FailingChatModel()))
+
+    reply = await brain.generate(system_prompt=SYSTEM_PROMPT, history=[], text="hola")
+
+    assert "asistente del equipo de asesores" in reply
+
+
+def _groq_response(text: str) -> httpx.Response:
+    return httpx.Response(200, json={"choices": [{"message": {"content": text}}]})
+
+
+@pytest.mark.asyncio
+async def test_groq_adapter_sends_openai_shaped_payload_with_system_prompt():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _groq_response("¡Hola! ¿qué buscas?")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    model = GroqChatModel("test-key", "test-model", client)
+
+    reply = await model.complete(
+        system_prompt=SYSTEM_PROMPT,
+        messages=[
+            {"role": "user", "content": "hola"},
+            {"role": "assistant", "content": "¡hola!"},
+        ],
+    )
+
+    assert reply == "¡Hola! ¿qué buscas?"
+    request = seen[0]
+    assert request.url == "https://api.groq.com/openai/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer test-key"
+    body = json.loads(request.content)
+    assert body["model"] == "test-model"
+    assert body["messages"][0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert body["messages"][1:] == [
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": "¡hola!"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_groq_adapter_raises_chat_model_error_on_terminal_http_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "bad request"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    model = GroqChatModel("test-key", "test-model", client)
 
     with pytest.raises(ChatModelError):
         await model.complete(

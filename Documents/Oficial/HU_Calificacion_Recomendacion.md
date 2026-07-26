@@ -465,9 +465,11 @@ Scenario: Timeout parcial en la consulta externa
 **Alineación**
 - (a) Recommendation (RECOMMENDATION), no bloqueante.
 - (b) Servicio determinista fuera del SAS (fan-out/fan-in).
-- (c) Sin tabla propia hoy; candidata a `recommendations.neighborhood` (jsonb) en US-310.
-- (d) Implementado: `NeighborhoodEnrichmentAdapter`, `GoogleMapsClient` — sin API key configurada
-  (Sprint 3B), evento `NeighborhoodEnriched` ya modelado.
+- (c) Persiste en `recommendations.neighborhood` (jsonb), implementado en US-310.
+- (d) Implementado: `NeighborhoodEnrichmentAdapter`, `GoogleMapsClient` con `google_maps_api_key`
+  configurable (`Settings`, opcional — sin key no hay llamadas de red) y resolución de ubicación real
+  vía `PropertyLocationPort`/`SqlPropertyLocationLookup` (antes se usaba el `property_id` como
+  placeholder); evento `NeighborhoodEnriched` ya modelado.
 
 ### US-308 — Reemplazar embedding stand-in por modelo real
 
@@ -546,7 +548,21 @@ Scenario: Guardar sesión de recomendación
   `wiring.handle_profile_completed` estampa `delivered_at` tras publicar `ResponseReady`; `feedback`
   queda nullable para eventos futuros; sprint-3-1-recommendation-schema-persistence). Cierra US-301.
 
-### AI-104 [GAP — no implementado] — Coordinator Agent y Intent Router LLM-backed
+### AI-104 [Implementado — alcance corregido] — Coordinator Agent y Intent Router LLM-backed
+
+> **2026-07-25 corrección de alcance** (`openspec/changes/intent-router-ai-104/`): el Coordinator
+> Agent descrito abajo YA estaba implementado (`CoordinatorAgent.handle_message` en
+> `coordinator.py`, con guardrail interceptor, identity gate, qualification turn y registro de
+> `AIDecisionTrace` vía `trace_decision`) — la premisa `[GAP — no implementado]` original estaba
+> desactualizada. Lo único que realmente faltaba era el Intent Router LLM-backed (mismo gap ya
+> documentado por separado en AI-105 más abajo). Ese Intent Router quedó implementado por este
+> change: `IntentRouterPort`/`GeminiIntentRouter`/`KeywordIntentRouter`
+> (`app/modules/conversation_ownership/application/intent_router.py`), invocado desde
+> `CoordinatorAgent._classify_intent` (después del guardrail bypass, antes del identity gate) y
+> registrado como `tool_call` en el `AIDecisionTrace` existente — sin nueva tabla ni columna. El
+> resultado de la clasificación aún no determina ninguna rama de `handle_message` (no-goal
+> explícito del design.md); consumir la categoría para enrutar de verdad queda como iteración
+> futura una vez validado el set de categorías contra tráfico real.
 
 Como sistema quiero un Coordinator Agent (SAS) que orqueste toda la conversación y delegue a
 Qualification Flow, Objection Handler y Matching Engine según la intención detectada por el Intent
@@ -564,10 +580,15 @@ Scenario: Router clasifica intención y delega
 
 **Alineación**
 - (a) Transversal a Discovery/Recommendation/Scheduling (todo el Conversation FSM).
-- (b) Coordinator Agent + Intent Router — diseño puro en Agentic_System.md, cero código.
-- (c) `ai_decision_traces` (tabla ya existe en Supabase, sin consumidor actual), `conversations`.
-- (d) [GAP] No implementado; hoy la transición de estado y el disparo de `search()` se hacen
-  directamente en `wiring.py` sin pasar por un Coordinator ni registrar trazas de decisión.
+- (b) Coordinator Agent — YA implementado (`CoordinatorAgent.handle_message`); Intent Router —
+  implementado por `intent-router-ai-104` (`IntentRouterPort`, invocado antes del identity gate,
+  aún sin consumir la categoría para enrutar — ver nota de alcance arriba).
+- (c) `ai_decision_traces` (ya consumida por `trace_decision`/`DecisionTraceRecorder`,
+  `tool_calls` incluye ahora `intent_router.classify`), `conversations`.
+- (d) Implementado: `CoordinatorAgent` (guardrail → identity gate → qualification turn →
+  conversational turn, con `AIDecisionTrace` por turno) + `IntentRouterPort`/
+  `GeminiIntentRouter`/`KeywordIntentRouter` (`intent_router.py`). Pendiente (fuera de este
+  change): que la categoría clasificada determine la rama ejecutada.
 
 ---
 
@@ -590,17 +611,413 @@ Scenario: Router clasifica intención y delega
 | US-304 | Retrieval semántico pgvector | Recommendation (RECOMMENDATION) | Matching Engine (pgvector `<->` + HNSW, fallback en memoria solo en SQLite — sprint-3-2-hybrid-retrieval-sql) | property_embeddings | Sí |
 | US-305 | Ranking ponderado | Recommendation (RECOMMENDATION) | Matching Engine | — (en memoria) | Sí |
 | US-306 | Explicación en lenguaje natural | Recommendation (RECOMMENDATION) | Explanation (template, swap a LLM) | — (en memoria) | Sí |
-| US-307 | Enriquecimiento de vecindario | Recommendation (RECOMMENDATION) | Servicio determinista fan-out/fan-in | — (en memoria) | Parcial |
+| US-307 | Enriquecimiento de vecindario | Recommendation (RECOMMENDATION) | Servicio determinista fan-out/fan-in, `google_maps_api_key` + `PropertyLocationPort` | recommendations.neighborhood (jsonb) | Sí |
 | US-308 | Modelo de embeddings real | Soporte a Recommendation | Infraestructura (`OpenAIEmbeddingModel`, seam async con fallback determinista) | property_embeddings | Sí |
 | US-309 | Reconciliar esquema properties | Soporte a Recommendation | N/A (datos — migración 0010 condicional) | properties | Sí |
 | US-310 | Persistir recommendations | Recommendation (RECOMMENDATION) | `RecommendationService` persiste; Coordinator (AI-104) heredará la orquestación | recommendations (nueva) | Sí |
-| AI-104 | Coordinator Agent + Intent Router | Transversal a toda la Conversation FSM | Coordinator/Intent Router (diseño) | ai_decision_traces, conversations | No [GAP] |
+| AI-104 | Coordinator Agent + Intent Router | Transversal a toda la Conversation FSM | Coordinator (ya implementado) + Intent Router (`intent-router-ai-104`, clasifica pero aún no enruta) | ai_decision_traces, conversations | Sí (alcance corregido) |
+| US-212 [NUEVA] | Conectar Availability Validator + Scheduling al flujo | Recommendation→Scheduling | Wiring en CoordinatorAgent sobre servicios ya implementados | appointments, leads.pipeline_stage | No [GAP de wiring] |
+| US-213 [NUEVA] | Reminder Scheduler real (24h/2h) | Transversal a Scheduling | Reemplaza NoOpReminderScheduler | outbox_events | No [GAP], depende de US-212 |
+| AI-105 [NUEVA] | Intent Router (1 llamada LLM, N categorías) | Transversal | Coordinator (diseño, sin código) | ai_decision_traces | No [GAP] |
+| AI-106 [NUEVA] | Knowledge/RAG Service (Objeción + Q&A) | Transversal | Objection Handler + Q&A unificado (diseño, sin código) | knowledge_documents (nueva) | No [GAP], depende de AI-105 |
+| US-214 [NUEVA] | LeadReadinessService (score continuo + financing readiness) | Transversal | Extiende LeadScoringService | buyer_profiles/leads (columnas nuevas) | No [GAP] |
+| US-215 [ADAPTADA de US-206] | Bajar umbral de Completeness Gate | Discovery→Recommendation | Config de CompletenessGate existente | buyer_profiles, leads, outbox_events | No [config pendiente] |
+| US-216 [ADAPTADA] | Tono conversacional + resumen cada 2 respuestas | Discovery (QUALIFICATION) | Prompt (DEFAULT_SYSTEM_PROMPT) | — | No [prompt pendiente] |
+| US-217 [ADAPTADA de US-202..205] | Reordenar preguntas Nivel 1 / Nivel 2 | Discovery (QUALIFICATION) | Orden de extractores existentes | buyer_profiles | No [orquestación pendiente] |
+| US-218 [ADAPTADA] | Diferir captura de identidad (DNI) | New→Discovery | Reordena Identity Gate en coordinator.py | leads | No [orquestación pendiente] |
+| US-219 [NUEVA] | Motivación + preguntas adaptativas por tipo | Discovery (QUALIFICATION) | Nuevo extractor `extract_motivation` | buyer_profiles (columna nueva) | No [GAP] |
+| US-220 [NUEVA] | Turno de profundización pre-agenda | Recommendation→Scheduling | Prompt/orquestación tras el narrator | — | No [GAP], depende de US-212 |
+| US-221 [ADAPTADA de US-212] | Invitación conversacional a visita | Recommendation→Scheduling | Prompt sobre wiring de US-212 | — | No [bloqueada por US-212] |
+
+## Epic 4 — Backlog de Conversión (propuesta 2026-07-25, HUs nuevas/adaptadas)
+
+> Origen: análisis de una propuesta de mejora de flujo conversacional (conversación no-formulario,
+> recomendación temprana, agendamiento con lenguaje natural) contrastada contra el estado real del
+> código (`Agentic_System.md` §12, re-verificado con Explore el 2026-07-25). Cada HU se marca
+> **[NUEVA]** (capacidad sin código hoy) o **[ADAPTADA — ver US-XXX]** (modifica el comportamiento de
+> una HU ya implementada, sin duplicar su documentación). Numeración continúa desde US-211 / AI-104.
+> Dos ideas de la propuesta se **rechazan explícitamente** (ver nota al final de la sección) por
+> fragmentar responsabilidades ya resueltas correctamente por servicios deterministas existentes.
+
+### P0 — Wiring puro (cero rebuild, servicios ya construidos y probados en aislamiento)
+
+#### US-212 [NUEVA] — Conectar Availability Validator + Scheduling Service al flujo conversacional
+
+Como sistema quiero que `CoordinatorAgent` invoque `AvailabilityValidatorService` y
+`SchedulingService.book_visit` cuando el lead acepta un horario, para que exista agendamiento real en
+producción (hoy ambos servicios están completos y testeados de forma aislada, pero ningún nodo del grafo
+ni `coordinator.py` los llama — confirmado por ausencia total de imports de `appointment` en
+`coordinator.py`).
+
+```gherkin
+Feature: Agendamiento conectado al flujo conversacional
+Scenario: Lead acepta un horario propuesto
+  Given Conversation State = Recommendation (RECOMMENDATION) y un horario ya validado por
+        AvailabilityValidatorService
+  When el lead confirma el horario en el turno conversacional
+  Then CoordinatorAgent invoca SchedulingService.book_visit (re-valida disponibilidad internamente)
+  And se crea el evento en Google Calendar y se persiste Appointment
+  And se publica AppointmentBooked y Lead.pipeline_stage sincroniza APPOINTMENT_SET a wacrm
+```
+
+**Alineación**
+- (a) Recommendation → Scheduling (RECOMMENDATION→SCHEDULING, transición hoy inexistente en código).
+- (b) Capa agentic: llamada directa desde `CoordinatorAgent.handle_message` (mismo patrón determinista
+  que `run_qualification_turn`), no requiere LLM adicional — solo un nuevo paso de orquestación.
+- (c) Tablas ya existentes: `appointments` (US-402/404), `leads.pipeline_stage`.
+- (d) [GAP de wiring, no de servicio] `AvailabilityValidatorService` y
+  `SchedulingService.book_visit` (`app/modules/appointment/application/`) están implementados y
+  probados (`tests/test_availability_validator.py`, `tests/test_scheduling_service.py`); falta
+  exclusivamente el paso en `coordinator.py` que los invoque.
+
+#### US-213 [NUEVA] — Implementar Reminder Scheduler real (24h/2h)
+
+Como sistema quiero reemplazar `NoOpReminderScheduler` por una implementación real que programe
+recordatorios 24h y 2h antes de la visita, para reducir el no-show.
+
+```gherkin
+Feature: Recordatorios de visita
+Scenario: Visita agendada con más de 24h de anticipación
+  Given un Appointment confirmado vía SchedulingService.book_visit
+  When faltan 24h para la visita
+  Then el lead recibe un recordatorio por WhatsApp
+  And 2h antes recibe un segundo recordatorio
+  And ambos envíos quedan trazados (idempotentes ante reintentos del outbox)
+```
+
+**Alineación**
+- (a) Transversal a Scheduling (SCHEDULING), posterior a US-212.
+- (b) Servicio determinista fuera del SAS — implementa `ReminderSchedulerPort`
+  (`app/modules/appointment/application/reminder_port.py`), hoy solo `NoOpReminderScheduler` (stub
+  explícito documentado como placeholder de US-405).
+- (c) Reutiliza `outbox_events` (con el backoff de `alembic/versions/0019_outbox_retry_backoff.py`) para
+  el envío programado.
+- (d) [GAP] No implementado — depende de US-212 (sin agendamiento real, no hay fecha de visita sobre la
+  cual programar recordatorios).
+
+### P1 — Construcción acotada (diseñada en Agentic_System.md §1–2, pendiente de código)
+
+#### AI-105 [NUEVA] — Intent Router (1 llamada LLM, N categorías)
+
+Como sistema quiero clasificar cada mensaje entrante en una categoría de intención (calificación,
+pregunta informativa, objeción, agendamiento, otro) mediante una única llamada LLM ligera, para
+enrutar el turno sin necesidad de un agente autónomo adicional.
+
+```gherkin
+Feature: Enrutamiento por intención
+Scenario: Mensaje ambiguo entre pregunta y objeción
+  Given un mensaje entrante del lead
+  When IntentRouter.classify se ejecuta (1 llamada LLM, salida JSON acotada a N categorías)
+  Then CoordinatorAgent recibe la categoría antes de decidir el sub-flujo
+  And se registra un AIDecisionTrace con la categoría y el mensaje clasificado
+```
+
+**Alineación**
+- (a) Transversal — corre al inicio de `CoordinatorAgent.handle_message`, antes de `run_qualification_turn`
+  / `_conversational_turn`.
+- (b) Capa agentic: **no existe hoy** — confirmado por ausencia total de símbolo `IntentRouter` en
+  `app/` (graphify había flaggeado AMBIGUOUS la relación Intent Router↔LangGraphResponder;
+  Agentic_System.md §12.1.1 confirma que no hay relación de implementación). Reemplazaría el
+  gate implícito de `run_qualification_turn` (que hoy decide solo por "¿hay Lead vinculado?", no por
+  intención del mensaje).
+- (c) `ai_decision_traces` (tabla ya existe en Supabase, sin consumidor actual).
+- (d) [GAP] No implementado. Prerrequisito conceptual de AI-106 (enrutar Objeción vs Q&A) y de un
+  agendamiento con lenguaje natural más fino en US-212.
+
+#### AI-106 [NUEVA] — Knowledge/RAG Service unificado (Objection Handler + Q&A informativo)
+
+Como AI Agent quiero responder objeciones (precio, zona, plusvalía, financiamiento) y preguntas
+informativas del lead con contenido fundamentado en una base de conocimiento aprobada, en vez de solo
+detectar y puntuar la objeción sin responderla.
+
+```gherkin
+Feature: Respuesta fundamentada a objeciones y preguntas
+Scenario: Lead pregunta por plusvalía de la zona
+  Given AI-105 clasifica el mensaje como Objeción o Pregunta informativa
+  When KnowledgeService.answer recupera pasajes relevantes de la KB aprobada (RAG)
+  Then la respuesta se redacta solo con esos pasajes (sin cifras no verificadas — Regla 2/QA-6)
+  And se reutiliza la misma infraestructura de retrieval para ambos intents (Objeción y Q&A)
+```
+
+**Alineación**
+- (a) Transversal a Discovery/Recommendation (Objeción) y a cualquier estado (Q&A).
+- (b) Capa agentic: **no existe hoy**. Lo único implementado es la detección/puntuación determinista
+  sin respuesta generada: `qualification_flow.py::extract_objection` +
+  `LeadScoringService.record_objection` (Hot/Warm/Cold, sin dimensión de financiamiento — ver US-214).
+  No hay módulo de RAG, vector store de documentos ni `ObjectionHandler`/`KnowledgeService` en el repo
+  (confirmado, distinto del pgvector de `property_embeddings` que indexa propiedades, no conocimiento).
+- (c) Tabla nueva a definir (`knowledge_documents` + embeddings), fuera de `property_embeddings`.
+- (d) [GAP] No implementado. Depende de AI-105 para saber cuándo invocarse.
+
+#### US-214 [NUEVA] — LeadReadinessService: score continuo + urgencia + readiness financiera
+
+Como AI Agent quiero un score continuo ponderado (intención, presupuesto, zona, horizonte, forma de
+pago, decisor) además de la clasificación Hot/Warm/Cold binaria por objeciones, y una readiness
+financiera en 3 estados (READY/PRE-READY/DISCOVERY), para alimentar tanto el disparo temprano de
+recomendación como el Ownership Policy Engine.
+
+```gherkin
+Feature: Readiness continua del lead
+Scenario: Perfil parcial pero con señales fuertes de urgencia
+  Given BuyerProfile con financing_type, timeline y locations capturados (no todas las 7 dimensiones)
+  When LeadReadinessService.evaluate se ejecuta
+  Then retorna un score continuo ponderado (no solo Hot/Warm/Cold)
+  And clasifica financing_readiness en READY, PRE-READY o DISCOVERY
+  And el resultado alimenta tanto al Coordinator (trigger de recomendación temprana, US-215) como al
+      OwnershipPolicyEngine
+```
+
+**Alineación**
+- (a) Transversal a Discovery/Recommendation.
+- (b) Capa agentic: **no existe** — confirmado, no hay símbolo `LeadReadiness`/`PRE-READY`/`PRE_READY`
+  en `app/`. Extiende (no reemplaza) `LeadScoringService`
+  (`app/modules/lead_qualification/application/lead_scoring.py`, umbrales
+  `_HOT_THRESHOLD`/`_WARM_THRESHOLD` ya existentes) — mismo servicio, nueva dimensión de salida.
+- (c) Extiende `buyer_profiles` o `leads` con columna(s) para financing_readiness y el score continuo
+  (migración nueva).
+- (d) [GAP] No implementado. `LeadScoringService.record_objection` hoy solo baja de un score inicial de
+  100 por objeciones (`100 - 15*tipos - 5*total`); no incorpora presupuesto/zona/horizonte/decisor como
+  señales positivas.
+
+#### US-215 [ADAPTADA — ver US-206] — Bajar el umbral de Completeness Gate (recomendación-first)
+
+Como Product Owner quiero recalibrar `profile_completeness_threshold` (hoy 90%, `app/core/config.py:42`)
+a un valor más bajo para disparar `ProfileCompleted`/Matching con ~4 dimensiones capturadas en vez de
+esperar el perfil casi completo, mejorando el time-to-first-recommendation sin reconstruir el pipeline.
+
+```gherkin
+Feature: Recomendación temprana
+Scenario: Perfil con 4 dimensiones núcleo capturadas
+  Given BuyerProfile con budget, locations, property_type y timeline capturados (no financing_type ni
+        must_haves ni decision_maker_mode)
+  When completeness(profile) >= nuevo umbral recalibrado (< 90%)
+  Then CompletenessGate.can_advance_to_recommendation retorna can_advance = true
+  And se dispara Matching con esas 4 dimensiones; el resto se captura como refinamiento posterior
+      (Nivel 2, ver US-217)
+```
+
+**Alineación**
+- (a) Discovery→Recommendation (mismo evento `ProfileCompleted` de US-206, no una transición nueva).
+- (b) Config de servicio existente — `CompletenessGate.can_advance_to_recommendation`
+  (`app/modules/lead_qualification/application/completeness_gate.py:31`) ya acepta un `threshold`
+  explícito; no requiere cambio de código, solo de configuración/valor default.
+- (c) `buyer_profiles`, `leads`, `outbox_events` (mismas de US-206, sin tabla nueva).
+- (d) [ADAPTA A US-206] Único cambio real: bajar `profile_completeness_threshold` en
+  `app/core/config.py` y validar con datos que el umbral nuevo no dispara recomendaciones con perfiles
+  demasiado vacíos (riesgo: falsos positivos de Matching con 0 candidatos — mitigado por
+  `search_diagnostics.py`, ver nota más abajo).
+
+### P2 — Prompt y diseño conversacional (cero cambio de arquitectura)
+
+#### US-216 [ADAPTADA — ver DEFAULT_SYSTEM_PROMPT en prompts.py] — Tono conversacional con resumen cada 2 respuestas
+
+Como lead quiero una conversación fluida (no formulario) con un resumen breve de lo entendido cada 2
+respuestas, en vez de una batería de preguntas secas.
+
+```gherkin
+Feature: Conversación no-formulario
+Scenario: Lead responde 2 preguntas consecutivas
+  Given DEFAULT_SYSTEM_PROMPT (prompts.py) ya rige el tono del nodo respond
+  When el lead completa su segunda respuesta consecutiva de calificación
+  Then la siguiente respuesta del asistente incluye un resumen breve de lo entendido antes de la
+       siguiente pregunta
+  And el tono se mantiene cálido-profesional (emojis con moderación)
+```
+
+**Alineación**
+- (a) Discovery (QUALIFICATION) — no cambia el estado FSM, solo el prompt.
+- (b) Prompt únicamente — `DEFAULT_SYSTEM_PROMPT` (`app/modules/conversation_ownership/domain/prompts.py`,
+  ya freeform y cubre greeting/qualification/recommendation/handoff en un solo prompt, con override por
+  organización vía Prompt Registry en `coordinator.py::_load_system_prompt`).
+- (c) Ninguna tabla nueva; usa el mismo Prompt Registry ya existente.
+- (d) [ADAPTA] Reescritura de contenido del prompt; sin cambio de código en `llm_brain.py` ni en el
+  grafo (§12.1 de Agentic_System.md confirma que el nodo `respond` no decide nada, solo redacta —
+  cambiar tono es 100% prompt).
+
+#### US-217 [ADAPTADA — ver US-202 a US-205] — Reordenar preguntas: Nivel 1 obligatorio / Nivel 2 refinamiento
+
+Como AI Agent quiero disparar preguntas de Nivel 1 (intención, tipo, ubicación, presupuesto, horizonte)
+antes que las de Nivel 2 (dormitorios, amenidades, mascotas, piso), para alcanzar el umbral de US-215
+más rápido.
+
+```gherkin
+Feature: Secuencia de preguntas por nivel
+Scenario: Conversación nueva sin perfil previo
+  Given un Lead recién vinculado sin BuyerProfile capturado
+  When qualification_flow.* dispara extractores
+  Then budget, locations, property_type y timeline se solicitan antes que must_haves de refinamiento
+  And una vez alcanzado el umbral de US-215, las preguntas de Nivel 2 se formulan como refinamiento
+      post-recomendación, no como bloqueo previo
+```
+
+**Alineación**
+- (a) Discovery (QUALIFICATION).
+- (b) Prompt + orden de servicio existente — reordena la secuencia de disparo de los extractores ya
+  implementados en `qualification_flow.py` (`extract_budget`, `extract_locations`,
+  `extract_property_type`, `extract_timeline_and_must_haves`); no crea extractores nuevos.
+- (c) `buyer_profiles` (mismas columnas de US-202 a US-205).
+- (d) [ADAPTA] Cambio de orquestación/prompt, no de dominio — `BuyerProfile.apply(patch)` ya soporta
+  actualización parcial e incremental, requisito para que Nivel 2 llegue después sin bloquear.
+
+#### US-218 [ADAPTADA — ver Identity Gate en coordinator.py] — Mover captura de identidad después de mostrar valor
+
+Como lead quiero que no se me pida DNI/nombre completo en el primer turno, sino después de recibir una
+recomendación o valor percibido, para reducir abandono temprano.
+
+```gherkin
+Feature: Captura de identidad diferida
+Scenario: Primer turno del lead
+  Given un mensaje entrante sin Lead vinculado todavía
+  When CoordinatorAgent.handle_message ejecuta el identity gate
+  Then el saludo inicial no exige DNI; solo nombre/canal mínimos para crear el Lead en wacrm
+  And la captura de datos sensibles (DNI) se pospone hasta después de GeminiRecommendationNarrator.narrate
+      o de un intercambio de valor equivalente
+```
+
+**Alineación**
+- (a) New→Discovery (QUALIFICATION), previo a la primera recomendación.
+- (b) Prompt/orquestación — modifica el orden dentro de `_identity_gate` /
+  `extract_identity` (`coordinator.py`), que hoy corre siempre antes de `run_qualification_turn`;
+  no elimina la captura, solo reordena qué campos son obligatorios en qué turno.
+- (c) `leads` (sin cambio de esquema).
+- (d) [ADAPTA] Requiere decidir qué campo mínimo sigue siendo obligatorio para `LeadSyncAdapter.create_lead`
+  (wacrm probablemente exige algún identificador) — a validar contra el contrato real de wacrm antes de
+  implementar.
+
+#### US-219 [NUEVA] — Motivación de compra y preguntas adaptativas por tipo de propiedad
+
+Como AI Agent quiero detectar la motivación (mudanza, inversión, vacacional, primera vivienda) y adaptar
+qué preguntas de Nivel 2 se formulan según `property_type` (ej. no preguntar piso si es casa), para
+evitar preguntas irrelevantes.
+
+```gherkin
+Feature: Motivación y preguntas condicionales
+Scenario: Lead busca casa, no departamento
+  Given BuyerProfile.property_type = CASA
+  When qualification_flow decide qué pregunta de Nivel 2 formular
+  Then no se pregunta por piso/nivel (solo aplica a departamento)
+  And se registra motivation en BuyerProfile (campo nuevo, mismo patrón que budget/timeline)
+```
+
+**Alineación**
+- (a) Discovery (QUALIFICATION).
+- (b) Extensión de servicio existente — nuevo extractor `extract_motivation` en `qualification_flow.py`
+  (mismo patrón regex/keyword que los extractores ya implementados) + reglas condicionales
+  `if property_type == CASA → skip piso`.
+- (c) `buyer_profiles` (columna `motivation` nueva, migración a definir — mismo patrón de
+  `0006_sprint2_1_buyer_profile_dimensions`).
+- (d) [GAP] No implementado. Candidato a ampliar `PROFILE_DIMENSIONS` (hoy 7 elementos post-US-208) a 8.
+
+#### US-220 [NUEVA] — Turno de profundización antes de proponer horario
+
+Como AI Agent quiero preguntar "¿cuál de estas opciones te llamó más la atención?" después de
+`GeminiRecommendationNarrator.narrate` y antes de invitar a agendar, para confirmar interés real antes
+de invertir un slot de `AvailabilityValidatorService`.
+
+```gherkin
+Feature: Confirmación de interés antes de agendar
+Scenario: Lead recibió el Top-3 narrado
+  Given GeminiRecommendationNarrator.narrate ya envió el cierre del Top-3
+  When el lead responde a la recomendación
+  Then el siguiente turno del asistente pregunta cuál opción le interesó más antes de ofrecer horarios
+  And la propiedad elegida se usa como referencia para US-212 (Availability Validator)
+```
+
+**Alineación**
+- (a) Recommendation → Scheduling (RECOMMENDATION→SCHEDULING).
+- (b) Prompt/orquestación — nuevo turno conversacional en `DEFAULT_SYSTEM_PROMPT` /
+  `_conversational_turn`, posterior a la narración ya implementada
+  (`llm_narrator.GeminiRecommendationNarrator.narrate`).
+- (c) Ninguna tabla nueva.
+- (d) [GAP] No implementado; depende conceptualmente de US-212 para que el turno tenga a dónde llevar
+  (sin agendamiento conectado, la pregunta de profundización no tiene siguiente paso real).
+
+#### US-221 [ADAPTADA — ver US-212] — Lenguaje natural de invitación a visita
+
+Como lead quiero que la invitación a agendar sea una sugerencia conversacional ("la opción 2 se ajusta a
+lo que buscas, ¿coordinamos una visita?") en vez de una pregunta binaria "¿desea agendar? sí/no".
+
+```gherkin
+Feature: Invitación conversacional a visita
+Scenario: Lead mostró interés en una opción específica (US-220)
+  Given US-212 ya conecta SchedulingService al flujo conversacional
+  When el asistente redacta la invitación a visita
+  Then el texto conecta la opción elegida con la invitación, sin formato de pregunta sí/no rígida
+  And los horarios ofrecidos ya fueron pre-validados por AvailabilityValidatorService (Regla 1,
+      Agentic_System.md §1.B)
+```
+
+**Alineación**
+- (a) Recommendation → Scheduling (RECOMMENDATION→SCHEDULING).
+- (b) Prompt únicamente, sobre el mismo paso de orquestación de US-212 — sin este último, no hay
+  horarios reales que redactar en lenguaje natural.
+- (c) Ninguna tabla nueva.
+- (d) [ADAPTA A US-212] Bloqueada por US-212: no tiene sentido pulir el lenguaje de una invitación que
+  hoy no dispara ningún agendamiento real.
+
+### Decisiones rechazadas de la propuesta original
+
+- **Ranking Agent / Explanation Agent como agentes LLM separados**: rechazado. `WeightedRankingEngine`
+  (US-305) y `ExplanationGenerator` (US-306) ya son servicios deterministas correctamente acotados y
+  probados; convertirlos en agentes fragmentaría una responsabilidad ya resuelta sin ganancia (mismo
+  criterio de Agentic_System.md §1: "Regla del 45%" — un servicio determinista bien acotado supera a un
+  agente LLM adicional en este tramo).
+- **Requirement Profile Builder Agent separado**: rechazado. `BuyerProfileCaptureService`
+  (`app/modules/lead_qualification/application/profile_capture.py`) ya cumple esa función como servicio
+  determinista; agregar un agente LLM encima duplicaría lógica ya cubierta por US-202 a US-205, US-208 y
+  US-215 sin resolver ningún gap real.
+
+### HUs paralelizables (Epic 4)
+
+Análisis de dependencias reales del backlog pendiente (Epic 2 y 3 ya están implementadas — la
+paralelización histórica de US-202 a US-205 se documenta en su nota INVEST, línea ~171 — por eso esta
+sección cubre solo Epic 4, que es el trabajo por hacer). Una HU es "paralelizable" respecto a otra
+cuando **no** aparece como su prerrequisito en la columna (d)/Alineación de ninguna HU del grupo.
+
+#### Track A — Sin dependencias entre sí (se pueden asignar a agentes/devs distintos en simultáneo)
+
+| HU | Por qué es independiente |
+|----|---------------------------|
+| US-212 | Wiring puro sobre servicios ya terminados (`AvailabilityValidatorService`/`SchedulingService`); no requiere ninguna otra HU de Epic 4. |
+| AI-105 | Intent Router es un módulo nuevo aislado (clasificación LLM de 1 mensaje); se puede construir y testear con mensajes sintéticos sin esperar a AI-106 ni a ninguna HU de scheduling. |
+| US-214 | Extiende `LeadScoringService` de forma aditiva; no depende de wiring de scheduling ni de prompts. |
+| US-215 | Cambio de configuración (`profile_completeness_threshold`) sin dependencia de código nuevo. |
+| US-216 | Reescritura de `DEFAULT_SYSTEM_PROMPT`; no depende de ninguna otra HU. |
+| US-217 | Reordena extractores ya existentes de `qualification_flow.py`; no depende de US-215 aunque comparten motivación de negocio (recomendación temprana). |
+| US-218 | Reordena el Identity Gate; solo requiere validar el contrato mínimo de wacrm, no otra HU de Epic 4. |
+| US-219 | Nuevo extractor + columna nueva en `buyer_profiles`; aditivo, no depende de otras HUs. |
+
+**Nota de conflicto de archivo (no es dependencia lógica, pero sí de merge):** US-216, US-217 y US-218
+tocan `coordinator.py`/`prompts.py` en zonas cercanas (identity gate, orden de turnos, prompt system). Se
+pueden desarrollar en paralelo, pero conviene coordinar el merge (branches cortos, rebase frecuente) para
+evitar conflictos de texto, no de lógica.
+
+**Nota de conflicto de migración:** US-214 y US-219 agregan columnas nuevas a `buyer_profiles`/`leads` en
+paralelo. Son compatibles a nivel de dominio, pero sus migraciones Alembic deben generarse una después de
+la otra (no simultáneamente) para evitar dos revisiones con el mismo `down_revision`.
+
+#### Track B — Bloqueadas por una HU de Track A (empiezan cuando su prerrequisito está listo, no antes)
+
+| HU | Bloqueada por | Qué habilita el prerrequisito |
+|----|----------------|-------------------------------|
+| US-213 | US-212 | Sin agendamiento real no existe `Appointment.scheduled_at` sobre el cual calcular 24h/2h. |
+| AI-106 | AI-105 | El servicio RAG en sí (retrieval sobre KB) se puede prototipar en paralelo con Track A, pero el **wiring** que decide cuándo invocarlo (Objeción vs Q&A) necesita la categoría que produce el Intent Router. |
+| US-220 | US-212 (débil) | El turno de profundización se puede redactar y testear en aislado, pero su siguiente paso natural (ofrecer horarios) no tiene efecto real hasta que exista agendamiento conectado — dependencia de producto, no de código. |
+| US-221 | US-212 (fuerte) | No hay horarios reales que redactar en lenguaje natural sin el wiring de scheduling. |
+
+**Regla de asignación:** todo Track A puede arrancar el mismo día, en paralelo, sin coordinación entre
+HUs (solo la coordinación de archivo/migración ya señalada). Track B debe esperar a que su HU bloqueante
+en Track A esté al menos integrada (no necesariamente en producción) antes de empezar su propia
+implementación — no solo el diseño, que sí puede adelantarse.
+
+---
 
 ## Archivos de referencia (no se modifican, solo se citan como fuente)
 
 - `Documents/Oficial/Backlog.md`, `Maquina_Estados.md`, `Customer_Journey_Residencial_WhatsApp_Detallado.md`, `Agentic_System.md`, `AI_Recommendation_Domain_Model.md`
 - `app/modules/lead_qualification/domain/models.py`, `application/completeness_gate.py`, `application/staleness_guard.py`, `application/profile_capture.py`, `infrastructure/lead_sync.py`
 - `app/modules/recommendation/application/property_ingestion.py`, `retrieval.py`, `ranking_engine.py`, `explanation_generator.py`, `neighborhood_enrichment.py`, `recommendation_service.py`, `wiring.py`
+- Epic 4: `app/modules/conversation_ownership/application/coordinator.py`, `link_guard.py`; `app/modules/conversation_ownership/domain/prompts.py`; `app/modules/conversation_ownership/infrastructure/llm_brain.py`; `app/modules/recommendation/application/search_diagnostics.py`; `app/modules/appointment/application/availability_validator.py`, `scheduling_service.py`, `reminder_port.py`; `app/modules/lead_qualification/application/lead_scoring.py`; `app/core/config.py`; `Documents/Oficial/Agentic_System.md` §12 (estado real verificado)
 
 ## Verificación
 

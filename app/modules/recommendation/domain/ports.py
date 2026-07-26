@@ -73,6 +73,15 @@ class NeighborhoodEnrichmentPort(Protocol):
     ) -> dict[uuid.UUID, NeighborhoodInsight | None]: ...
 
 
+class PropertyLocationPort(Protocol):
+    """US-307: resolves a property to the location string Google Maps needs
+    (`zone`/`name_address`), so `NeighborhoodEnrichmentPort` implementations
+    never have to guess — a property with no resolvable location returns
+    `None`, which the adapter treats the same as a missing API key."""
+
+    async def location_for(self, property_id: uuid.UUID) -> str | None: ...
+
+
 class RecommendationPort(Protocol):
     """Facade the Coordinator (and, from Sprint 5, the Handoff Package
     Builder) calls — orchestrates filter -> retrieval -> rank -> explain ->

@@ -24,6 +24,11 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.conversation_ownership.application.guardrail import GuardrailInterceptor
+from app.modules.conversation_ownership.application.intent_router import (
+    IntentRouterPort,
+    get_default_intent_router,
+)
+from app.modules.conversation_ownership.application.link_guard import guard_reply
 from app.modules.conversation_ownership.application.ownership_policy import (
     OwnershipContext,
     OwnershipDecision,
@@ -55,7 +60,13 @@ from app.modules.lead_qualification.infrastructure.generative_extractor import (
     GenerativeExtractorPort,
     get_default_generative_extractor,
 )
+from app.modules.lead_qualification.infrastructure.repository import BuyerProfileRepository
 from app.modules.lead_qualification.infrastructure.wacrm_client import WacrmClient
+from app.modules.recommendation.application.search_diagnostics import (
+    diagnose,
+    render_grounding_note,
+)
+from app.modules.recommendation.infrastructure.repository import PropertyRepository
 from app.shared.infrastructure import event_bus
 from app.shared.infrastructure.observability import trace_decision
 
@@ -100,6 +111,7 @@ class CoordinatorAgent:
         sidebar: SidebarPublisher | None = None,
         generative_extractor: GenerativeExtractorPort | None = None,
         wacrm_client: WacrmClient | None = None,
+        intent_router: IntentRouterPort | None = None,
     ):
         from app.modules.conversation_ownership.application.langgraph_responder import (
             get_default_responder,
@@ -112,6 +124,7 @@ class CoordinatorAgent:
         self._sidebar = sidebar
         self._generative_extractor = generative_extractor or get_default_generative_extractor()
         self._wacrm_client = wacrm_client
+        self._intent_router = intent_router or get_default_intent_router()
         self._conversations = ConversationRepository(session)
         self._decisions = OwnershipDecisionRepository(session)
 
@@ -140,6 +153,7 @@ class CoordinatorAgent:
                     {"action": "guardrail_bypass", "explanation": decision.explanation}
                 )
             else:
+                await self._classify_intent(text, recorder)
                 ask_identity, identity_consumed = await self._identity_gate(
                     conversation, text, recorder
                 )
@@ -157,7 +171,7 @@ class CoordinatorAgent:
                         "qualification.run_turn", {"text": text}, qualification.summary()
                     )
                 response = await self._conversational_turn(
-                    conversation, text, qualification, ask_identity=ask_identity
+                    conversation, text, qualification, ask_identity=ask_identity, recorder=recorder
                 )
                 recorder.set_output({"action": "reply", "response": response})
 
@@ -196,6 +210,19 @@ class CoordinatorAgent:
             owner_id=decision.owner_id,
         )
         return decision
+
+    async def _classify_intent(self, text: str, recorder) -> None:
+        """AI-104 (scoped): records the message's classified intent category
+        on this turn's AIDecisionTrace. Additive-only — no branch in this
+        method's caller reads the result yet (design.md Non-Goals); a
+        classifier failure must never affect the reply, same contract as
+        `_build_grounding_note`."""
+        try:
+            category = await self._intent_router.classify(text)
+        except Exception:  # noqa: BLE001 — classification must never break the turn
+            logger.exception("Intent classification failed; continuing without it")
+            return
+        recorder.record_tool_call("intent_router.classify", {"text": text}, category)
 
     async def _identity_gate(
         self, conversation: Conversation, text: str, recorder
@@ -270,6 +297,7 @@ class CoordinatorAgent:
         text: str,
         qualification: QualificationTurnResult | None = None,
         ask_identity: bool = False,
+        recorder=None,
     ) -> str:
         if conversation.state is ConversationState.NEW:
             decision = self._policy_engine.evaluate(OwnershipContext(conversation=conversation))
@@ -301,6 +329,9 @@ class CoordinatorAgent:
             )
 
         system_prompt = await self._load_system_prompt(conversation.organization_id)
+        grounding_note = await self._build_grounding_note(conversation, recorder)
+        if grounding_note:
+            system_prompt = f"{system_prompt}\n\n{grounding_note}"
         response = await self._responder.respond(
             system_prompt=system_prompt, conversation_id=conversation.id, text=text
         )
@@ -314,6 +345,9 @@ class CoordinatorAgent:
             # name (mutually exclusive with qualification re-prompts, which
             # require a linked lead).
             response = REPROMPT_IDENTITY
+        response = await guard_reply(
+            self._session, organization_id=conversation.organization_id, reply=response
+        )
         conversation.record_event(
             ResponseReady(
                 organization_id=conversation.organization_id,
@@ -323,6 +357,62 @@ class CoordinatorAgent:
             )
         )
         return response
+
+    async def _build_grounding_note(
+        self,
+        conversation: Conversation,
+        recorder,
+    ) -> str | None:
+        """US-hallucination-fix (2026-07-24, CW-DEMO-1784860599/MSG-0010): a
+        lead asked for a property under a budget with zero Supabase matches
+        and the conversational brain — which never queries `properties` —
+        invented two listings with fake links.
+
+        2026-07-25 follow-up (same conversation, later turn): the original
+        fix only ran this check on the turn that just captured budget/zone.
+        The very next turn — no new dimension, so no grounding — the LLM,
+        primed by its *own* prior "en breve tendrás el Top-3" line, invented
+        three full listings with prices and addresses (no links this time,
+        so the link guard never saw it). Gate on conversation stage instead
+        of "did this turn's message carry a new signal": every Qualification
+        turn where the profile already has a budget or a zone re-runs the
+        real structured filter, until Recommendation takes over (the
+        `RecommendationService`'s own real Top-3) and this stops being
+        needed."""
+        if conversation.lead_id is None or conversation.state is not ConversationState.QUALIFICATION:
+            return None
+        try:
+            profile = await BuyerProfileRepository(self._session).get_by_lead_id(
+                conversation.lead_id
+            )
+            if profile is None or (profile.budget is None and not profile.locations):
+                return None
+            diagnosis = await diagnose(
+                PropertyRepository(self._session),
+                organization_id=conversation.organization_id,
+                budget=profile.budget,
+                zones=profile.locations,
+                property_type=profile.property_type,
+            )
+        except Exception:  # noqa: BLE001 — grounding must never break the turn
+            logger.exception(
+                "Search diagnostics failed for conversation %s; continuing without grounding",
+                conversation.id,
+            )
+            return None
+        if diagnosis is None:
+            return None
+        if recorder is not None:
+            recorder.record_tool_call(
+                "recommendation.diagnose_search",
+                {"budget": str(diagnosis.budget), "zones": diagnosis.zones},
+                (
+                    "has_matches"
+                    if diagnosis.has_matches
+                    else ("zone_mismatch" if diagnosis.zone_mismatch else "price_mismatch")
+                ),
+            )
+        return render_grounding_note(diagnosis)
 
     async def _load_system_prompt(self, organization_id: uuid.UUID) -> str:
         """Per-organization active prompt (ConfigStorePort.get_active_prompt).

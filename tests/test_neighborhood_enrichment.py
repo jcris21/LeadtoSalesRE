@@ -18,7 +18,11 @@ from sqlalchemy import select
 from app.modules.recommendation.application.neighborhood_enrichment import (
     NeighborhoodEnrichmentAdapter,
 )
-from app.modules.recommendation.infrastructure.maps_client import FakeMapsClient
+from app.modules.recommendation.infrastructure.maps_client import (
+    FakeMapsClient,
+    GoogleMapsClient,
+    MapsNotConfiguredError,
+)
 from app.shared.infrastructure.db_models import OutboxEventORM
 
 LEAD_ID = uuid.uuid4()
@@ -26,6 +30,32 @@ LEAD_ID = uuid.uuid4()
 
 def _three_property_ids() -> list[uuid.UUID]:
     return [uuid.uuid4(), uuid.uuid4(), uuid.uuid4()]
+
+
+class _FakeLocationLookup:
+    """Test double for `PropertyLocationPort` (US-307): a plain dict of
+    `property_id -> location | None`, so tests can assert exactly what
+    `MapsClient.nearby` was called with."""
+
+    def __init__(self, locations: dict[uuid.UUID, str | None]) -> None:
+        self._locations = locations
+        self.calls: list[uuid.UUID] = []
+
+    async def location_for(self, property_id: uuid.UUID) -> str | None:
+        self.calls.append(property_id)
+        return self._locations.get(property_id)
+
+
+class _RecordingMapsClient:
+    """Test double that just records the `zone` it was called with, so tests
+    can assert the adapter passed a real resolved location, not `property_id`."""
+
+    def __init__(self) -> None:
+        self.zones_called: list[str] = []
+
+    async def nearby(self, *, zone: str, property_id: uuid.UUID) -> tuple[str, ...]:
+        self.zones_called.append(zone)
+        return ("Park",)
 
 
 @pytest.mark.asyncio
@@ -150,3 +180,60 @@ async def test_background_retry_gives_up_after_bounded_attempts_without_raising(
     # fan-out call + 2 retry attempts = 3 total calls recorded by the fake).
     await adapter.wait_for_background()
     assert len(client.calls) == 1 + adapter._max_retries
+
+
+@pytest.mark.asyncio
+async def test_no_api_key_configured_skips_http_call_for_every_property():
+    """US-307: `GoogleMapsClient` with an empty key must never attempt the
+    HTTP request — the adapter resolves every property to `None` instead."""
+    property_ids = _three_property_ids()
+    client = GoogleMapsClient(http_client=None, api_key="")  # http_client unused: never called
+    adapter = NeighborhoodEnrichmentAdapter(client)
+
+    result = await adapter.enrich_top3(lead_id=LEAD_ID, property_ids=property_ids, timeout_ms=200)
+
+    assert result == {property_id: None for property_id in property_ids}
+
+
+@pytest.mark.asyncio
+async def test_maps_not_configured_error_raised_without_a_real_request():
+    with pytest.raises(MapsNotConfiguredError):
+        await GoogleMapsClient(http_client=None, api_key="").nearby(
+            zone="Palermo", property_id=uuid.uuid4()
+        )
+
+
+@pytest.mark.asyncio
+async def test_enrich_top3_resolves_real_location_instead_of_property_id():
+    """US-307: when a `location_lookup` is wired, the Maps call must use the
+    property's real resolved location, not the `property_id` placeholder."""
+    property_id = uuid.uuid4()
+    client = _RecordingMapsClient()
+    lookup = _FakeLocationLookup({property_id: "Palermo, Buenos Aires"})
+    adapter = NeighborhoodEnrichmentAdapter(client, location_lookup=lookup)
+
+    result = await adapter.enrich_top3(
+        lead_id=LEAD_ID, property_ids=[property_id], timeout_ms=200
+    )
+
+    assert client.zones_called == ["Palermo, Buenos Aires"]
+    assert result[property_id] is not None
+    assert result[property_id].nearby_places == ("Park",)
+
+
+@pytest.mark.asyncio
+async def test_property_with_no_resolvable_location_is_skipped_without_blocking_siblings():
+    """US-307: a property with nothing in `PropertyLocationPort` resolves to
+    `None` without a Maps call, and does not affect its siblings' results."""
+    has_location, no_location = uuid.uuid4(), uuid.uuid4()
+    client = _RecordingMapsClient()
+    lookup = _FakeLocationLookup({has_location: "Palermo, Buenos Aires", no_location: None})
+    adapter = NeighborhoodEnrichmentAdapter(client, location_lookup=lookup)
+
+    result = await adapter.enrich_top3(
+        lead_id=LEAD_ID, property_ids=[has_location, no_location], timeout_ms=200
+    )
+
+    assert client.zones_called == ["Palermo, Buenos Aires"]
+    assert result[has_location] is not None
+    assert result[no_location] is None
