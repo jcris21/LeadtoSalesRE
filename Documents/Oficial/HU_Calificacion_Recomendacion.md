@@ -616,7 +616,7 @@ Scenario: Router clasifica intención y delega
 | US-309 | Reconciliar esquema properties | Soporte a Recommendation | N/A (datos — migración 0010 condicional) | properties | Sí |
 | US-310 | Persistir recommendations | Recommendation (RECOMMENDATION) | `RecommendationService` persiste; Coordinator (AI-104) heredará la orquestación | recommendations (nueva) | Sí |
 | AI-104 | Coordinator Agent + Intent Router | Transversal a toda la Conversation FSM | Coordinator (ya implementado) + Intent Router (`intent-router-ai-104`, clasifica pero aún no enruta) | ai_decision_traces, conversations | Sí (alcance corregido) |
-| US-212 [NUEVA] | Conectar Availability Validator + Scheduling al flujo | Recommendation→Scheduling | Wiring en CoordinatorAgent sobre servicios ya implementados | appointments, leads.pipeline_stage | No [GAP de wiring] |
+| US-212 [NUEVA] | Conectar Availability Validator + Scheduling al flujo | Recommendation→Scheduling | Wiring en CoordinatorAgent sobre servicios ya implementados (`scheduling_turn.py`, `openspec/changes/scheduling-wiring-us-212`) | appointments, leads.pipeline_stage | Sí |
 | US-213 [NUEVA] | Reminder Scheduler real (24h/2h) | Transversal a Scheduling | Reemplaza NoOpReminderScheduler | outbox_events | No [GAP], depende de US-212 |
 | AI-105 [NUEVA] | Intent Router (1 llamada LLM, N categorías) | Transversal | Coordinator (diseño, sin código) | ai_decision_traces | No [GAP] |
 | AI-106 [NUEVA] | Knowledge/RAG Service (Objeción + Q&A) | Transversal | Objection Handler + Q&A unificado (diseño, sin código) | knowledge_documents (nueva) | No [GAP], depende de AI-105 |
