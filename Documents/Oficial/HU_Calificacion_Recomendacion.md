@@ -93,13 +93,15 @@ Scenario: Lead declara presupuesto
 - (a) Estado FSM: Discovery (QUALIFICATION) — no transiciona por sí sola.
 - (b) Capa agentic: Qualification Flow — `extract_budget` en
   `app/modules/lead_qualification/application/qualification_flow.py` (extracción determinística
-  keyword/regex, sin LLM aún) ya llama a `BuyerProfileCaptureService.update_profile`; endpoint de
-  soporte `POST /api/v1/leads/{lead_id}/profile/budget`. Falta el enrutamiento desde una conversación
-  real (Coordinator Agent / AI-104) — ver
-  `openspec/changes/qualification-dimensions-us-202-205/` y
+  keyword/regex, sin LLM aún) llama a `BuyerProfileCaptureService.update_profile`. Enrutada desde la
+  conversación real: `CoordinatorAgent.handle_message` invoca `run_qualification_turn`
+  (`qualification_turn.py`) en cada turno con un `Lead` vinculado — no requiere el endpoint de
+  soporte `POST /api/v1/leads/{lead_id}/profile/budget` (que sigue disponible para QA/replays) — ver
+  `openspec/changes/qualification-flow-us-202-205/` y
   `openspec/specs/lead-qualification/us-202-205-enrichment.md`.
 - (c) Tablas: `buyer_profiles`, `leads`.
-- (d) Implementado hoy: `BuyerProfile.apply(patch)` en `lead_qualification/domain`.
+- (d) Implementado: `BuyerProfile.apply(patch)` en `lead_qualification/domain`; E2E probado en
+  `tests/test_coordinator_qualification_turn.py`.
 
 ### US-203 — Capturar dimensión de ubicación
 
@@ -117,11 +119,13 @@ Scenario: Lead menciona distrito o zona
 **Alineación**
 - (a) Discovery (QUALIFICATION).
 - (b) Qualification Flow — `extract_locations` en `qualification_flow.py` (matching contra catálogo
-  fijo de zonas conocidas, sin catálogo por-organización — abierto, ver design.md de este change);
-  endpoint de soporte `POST /api/v1/leads/{lead_id}/profile/locations`. Falta enrutamiento desde
-  conversación real (AI-104) — ver `openspec/changes/qualification-dimensions-us-202-205/`.
+  fijo de zonas conocidas, sin catálogo por-organización — abierto, ver design.md del change
+  original). Enrutada desde la conversación real vía `CoordinatorAgent` → `run_qualification_turn`;
+  endpoint de soporte `POST /api/v1/leads/{lead_id}/profile/locations` disponible para QA — ver
+  `openspec/changes/qualification-flow-us-202-205/`.
 - (c) `buyer_profiles`.
-- (d) Implementado: `BuyerProfile.locations: tuple[str]`.
+- (d) Implementado: `BuyerProfile.locations: tuple[str]`; E2E probado en
+  `tests/test_coordinator_qualification_turn.py`.
 
 ### US-204 — Capturar dimensión de tipo de propiedad
 
@@ -139,11 +143,13 @@ Scenario: Lead indica tipo de propiedad
 **Alineación**
 - (a) Discovery (QUALIFICATION).
 - (b) Qualification Flow — `extract_property_type` en `qualification_flow.py` (keyword matching con
-  sinónimos en español, sin llamada LLM para el caso común); endpoint de soporte
-  `POST /api/v1/leads/{lead_id}/profile/property-type`. Falta enrutamiento desde conversación real
-  (AI-104) — ver `openspec/changes/qualification-dimensions-us-202-205/`.
+  sinónimos en español, sin llamada LLM para el caso común; mensaje con dos tipos captura el primero
+  mencionado). Enrutada desde la conversación real vía `CoordinatorAgent` → `run_qualification_turn`;
+  endpoint de soporte `POST /api/v1/leads/{lead_id}/profile/property-type` disponible para QA — ver
+  `openspec/changes/qualification-flow-us-202-205/`.
 - (c) `buyer_profiles`.
-- (d) Implementado: `PropertyType` enum + `BuyerProfile.property_type`.
+- (d) Implementado: `PropertyType` enum + `BuyerProfile.property_type`; E2E probado en
+  `tests/test_coordinator_qualification_turn.py`.
 
 ### US-205 — Capturar horizonte de decisión y must-haves
 
@@ -162,11 +168,14 @@ Scenario: Lead indica urgencia y requisitos indispensables
 **Alineación**
 - (a) Discovery (QUALIFICATION).
 - (b) Qualification Flow — `extract_timeline_and_must_haves` en `qualification_flow.py` (una sola
-  `ProfilePatch` puede portar ambas dimensiones sin borrar la otra); endpoints de soporte
-  `POST /api/v1/leads/{lead_id}/profile/timeline` y `.../must-haves`. Falta enrutamiento desde
-  conversación real (AI-104) — ver `openspec/changes/qualification-dimensions-us-202-205/`.
+  `ProfilePatch` puede portar ambas dimensiones sin borrar la otra; `must_haves` deduplica entradas
+  textualmente idénticas dentro de un mismo mensaje). Enrutada desde la conversación real vía
+  `CoordinatorAgent` → `run_qualification_turn`; endpoints de soporte
+  `POST /api/v1/leads/{lead_id}/profile/timeline` y `.../must-haves` disponibles para QA — ver
+  `openspec/changes/qualification-flow-us-202-205/`.
 - (c) `buyer_profiles`.
-- (d) Implementado: `Timeline` enum, `must_haves: tuple[str]`.
+- (d) Implementado: `Timeline` enum, `must_haves: tuple[str]`; E2E probado en
+  `tests/test_coordinator_qualification_turn.py`.
 
 > **Nota INVEST:** US-202 a US-205 reemplazan la caja única "descubrir necesidades" de US-201 y son
 > independientes entre sí (cada una toca una sola dimensión de `PROFILE_DIMENSIONS`). El Customer Journey
@@ -596,10 +605,10 @@ Scenario: Router clasifica intención y delega
 
 | ID | Título breve | Estado FSM | Capa agentic | Tabla(s) | Implementado hoy |
 |----|--------------|-----------|---------------|----------|-------------------|
-| US-202 | Capturar presupuesto | Discovery (QUALIFICATION) | Qualification Flow (extractor + endpoint, sin enrutamiento conversacional — qualification-dimensions-us-202-205) | buyer_profiles | Parcial |
-| US-203 | Capturar ubicación | Discovery (QUALIFICATION) | Qualification Flow (extractor + endpoint, sin enrutamiento conversacional — qualification-dimensions-us-202-205) | buyer_profiles | Parcial |
-| US-204 | Capturar tipo de propiedad | Discovery (QUALIFICATION) | Qualification Flow (extractor + endpoint, sin enrutamiento conversacional — qualification-dimensions-us-202-205) | buyer_profiles | Parcial |
-| US-205 | Capturar timeline y must-haves | Discovery (QUALIFICATION) | Qualification Flow (extractor + endpoint, sin enrutamiento conversacional — qualification-dimensions-us-202-205) | buyer_profiles | Parcial |
+| US-202 | Capturar presupuesto | Discovery (QUALIFICATION) | Qualification Flow (`extract_budget` en `qualification_flow.py`, invocado por `CoordinatorAgent` vía `run_qualification_turn` en cada turno real — qualification-flow-us-202-205) | buyer_profiles | Implementado |
+| US-203 | Capturar ubicación | Discovery (QUALIFICATION) | Qualification Flow (`extract_locations` en `qualification_flow.py`, invocado por `CoordinatorAgent` vía `run_qualification_turn` en cada turno real — qualification-flow-us-202-205) | buyer_profiles | Implementado |
+| US-204 | Capturar tipo de propiedad | Discovery (QUALIFICATION) | Qualification Flow (`extract_property_type` en `qualification_flow.py`, invocado por `CoordinatorAgent` vía `run_qualification_turn` en cada turno real — qualification-flow-us-202-205) | buyer_profiles | Implementado |
+| US-205 | Capturar timeline y must-haves | Discovery (QUALIFICATION) | Qualification Flow (`extract_timeline_and_must_haves` en `qualification_flow.py`, invocado por `CoordinatorAgent` vía `run_qualification_turn` en cada turno real — qualification-flow-us-202-205) | buyer_profiles | Implementado |
 | US-206 | Completeness Gate | Discovery→Recommendation | Guardrail no-LLM | buyer_profiles, leads, outbox_events | Sí |
 | US-207 | Sync Opportunity Stage=Qualified | Opportunity FSM (paralela) | Servicio determinista (ACL) | leads, crm_access_audit, crm_sync_cursors | Sí |
 | US-208 | Ampliar a 7 dimensiones (financing_type, decision_maker_mode) | Discovery (QUALIFICATION) | Qualification Flow (extractor `extract_financing_and_decision_mode` — buyer-profile-dimensions-us-208) | buyer_profiles | Sí |
