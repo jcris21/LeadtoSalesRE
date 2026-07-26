@@ -34,6 +34,7 @@ from app.modules.conversation_ownership.application.ownership_policy import (
     OwnershipDecision,
     OwnershipPolicyEngine,
 )
+from app.modules.conversation_ownership.application.scheduling_turn import run_scheduling_turn
 from app.modules.conversation_ownership.application.sidebar import SidebarPublisher
 from app.modules.conversation_ownership.domain.models import (
     Conversation,
@@ -328,6 +329,26 @@ class CoordinatorAgent:
                 reason="Ownership assigned to AI; beginning conversational qualification",
             )
 
+        scheduling = await self._scheduling_turn(conversation, text, recorder)
+        if scheduling is not None and scheduling.outcome != "no_slot":
+            # `guard_reply` polices LLM output for hallucinated property
+            # links (link_guard.py docstring) — this message is deterministic,
+            # service-composed text (the booking confirmation's `meet_link`
+            # comes straight from `GoogleCalendarPort`, the fallback messages
+            # are static strings), never LLM free text, so it bypasses the
+            # guard the same way the real Top-3 message already does
+            # (`recommendation.wiring`, per that docstring's own note).
+            response = scheduling.response or ""
+            conversation.record_event(
+                ResponseReady(
+                    organization_id=conversation.organization_id,
+                    conversation_id=str(conversation.id),
+                    chatwoot_conversation_id=conversation.chatwoot_conversation_id,
+                    response=response,
+                )
+            )
+            return response
+
         system_prompt = await self._load_system_prompt(conversation.organization_id)
         grounding_note = await self._build_grounding_note(conversation, recorder)
         if grounding_note:
@@ -357,6 +378,27 @@ class CoordinatorAgent:
             )
         )
         return response
+
+    async def _scheduling_turn(self, conversation: Conversation, text: str, recorder):
+        """US-212: only meaningful in `RECOMMENDATION` — aditive-only, same
+        gating posture as `_build_grounding_note`. A successful booking
+        transitions the FSM to `APPOINTMENT`; every other non-`no_slot`
+        outcome overrides this turn's reply with a deterministic message
+        (design.md Decision 5) so the LLM never gets a chance to claim a
+        visit is booked when it isn't."""
+        if conversation.state is not ConversationState.RECOMMENDATION:
+            return None
+        result = await run_scheduling_turn(self._session, conversation=conversation, text=text)
+        if result.outcome == "no_slot":
+            return result
+        if recorder is not None:
+            recorder.record_tool_call("scheduling.run_turn", {"text": text}, result.outcome)
+        if result.outcome == "booked":
+            conversation.transition_to(
+                ConversationState.APPOINTMENT,
+                reason="SchedulingService.book_visit succeeded",
+            )
+        return result
 
     async def _build_grounding_note(
         self,
