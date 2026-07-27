@@ -738,16 +738,20 @@ Scenario: Mensaje ambiguo entre pregunta y objeción
 **Alineación**
 - (a) Transversal — corre al inicio de `CoordinatorAgent.handle_message`, antes de `run_qualification_turn`
   / `_conversational_turn`.
-- (b) Capa agentic: **no existe hoy** — confirmado por ausencia total de símbolo `IntentRouter` en
-  `app/` (graphify había flaggeado AMBIGUOUS la relación Intent Router↔LangGraphResponder;
-  Agentic_System.md §12.1.1 confirma que no hay relación de implementación). Reemplazaría el
-  gate implícito de `run_qualification_turn` (que hoy decide solo por "¿hay Lead vinculado?", no por
-  intención del mensaje).
-- (c) `ai_decision_traces` (tabla ya existe en Supabase, sin consumidor actual).
-- (d) [GAP] No implementado. Prerrequisito conceptual de AI-106 (enrutar Objeción vs Q&A) y de un
-  agendamiento con lenguaje natural más fino en US-212.
+- (b) Capa agentic: implementada por `intent-router-ai-104` (`IntentRouterPort`/`GeminiIntentRouter`/
+  `KeywordIntentRouter`, 6 categorías) + wireada por este change (`intent-router-llm-ai-105`) —
+  `_classify_intent` ahora retorna la categoría y `CoordinatorAgent` la consume.
+- (c) `ai_decision_traces` (ya consumida por `trace_decision`; ahora también registra `knowledge.answer`
+  como `tool_call` cuando la rama de conocimiento dispara).
+- (d) Implementado (alcance acotado): `_classify_intent` deja de descartar su resultado; `objecion`/
+  `pregunta_informativa` disparan `KnowledgeService.answer` (AI-106) reemplazando la respuesta del LLM
+  conversacional solo cuando hay match en la KB, con fallback exacto al comportamiento previo ante
+  `found=False` o cualquier excepción. `qualification`, `agendamiento` (ya tiene ruta propia vía US-212),
+  `handoff_explicito` y `otro` permanecen sin rama dedicada — decisión de alcance explícita (ver
+  Non-Goals en `design.md`), no un gap accidental. 6 tests nuevos cubren respuesta fundamentada,
+  fallback por no-match, fallback por fallo del servicio, y no-invocación en categorías no consumidoras.
 
-#### AI-106 [Implementado — alcance acotado] — Knowledge/RAG Service unificado (Objection Handler + Q&A informativo)
+#### AI-106 [Implementado] — Knowledge/RAG Service unificado (Objection Handler + Q&A informativo)
 
 > **2026-07-27 actualización** (`openspec/changes/knowledge-rag-service-ai-106/`): el servicio RAG en sí
 > quedó implementado como `KnowledgeService.answer(organization_id, query, category=None, top_k=3)` en
@@ -756,9 +760,9 @@ Scenario: Mensaje ambiguo entre pregunta y objeción
 > respuesta se ensambla de forma **extractiva** (sin llamada LLM libre) a partir únicamente de los pasajes
 > recuperados, satisfaciendo estructuralmente la regla de "sin cifras no verificadas" sin depender de un
 > guardrail post-hoc. Tabla nueva `knowledge_documents` (migración `0021`, vector(1536) + HNSW + RLS por
-> `organization_id`, mirroring `property_embeddings`). Lo que sigue GAP, sin cambio de alcance: el
-> **wiring** que decide cuándo invocar el servicio (Objeción vs Q&A) sigue bloqueado por AI-105 (Intent
-> Router, no implementado) — `KnowledgeService` no está conectado a `CoordinatorAgent.handle_message`.
+> `organization_id`, mirroring `property_embeddings`). El wiring que decidía cuándo invocar el servicio
+> (Objeción vs Q&A) ya no es GAP: `intent-router-llm-ai-105` conecta `KnowledgeService` a
+> `CoordinatorAgent.handle_message` para las categorías `objecion`/`pregunta_informativa`.
 
 Como AI Agent quiero responder objeciones (precio, zona, plusvalía, financiamiento) y preguntas
 informativas del lead con contenido fundamentado en una base de conocimiento aprobada, en vez de solo
@@ -785,8 +789,8 @@ Scenario: Lead pregunta por plusvalía de la zona
   Postgres, ranking coseno en Python como fallback en SQLite, mismo patrón de `property_embeddings` —
   knowledge-rag-service-ai-106); 6 tests cubren aislamiento por organización, filtro por categoría,
   solo documentos `approved=true`, grounding (la respuesta nunca contiene texto ausente de los pasajes
-  recuperados) y KB vacía. Pendiente (fuera de este change, depende de AI-105): el wiring que decide
-  cuándo invocar el servicio desde `CoordinatorAgent`.
+  recuperados) y KB vacía. El wiring hacia `CoordinatorAgent` (antes pendiente de AI-105) quedó cerrado
+  por `intent-router-llm-ai-105` — ver Alineación (d) de AI-105 arriba para el detalle de la rama.
 
 #### US-214 [Implementado] — LeadReadinessService: score continuo + urgencia + readiness financiera
 
