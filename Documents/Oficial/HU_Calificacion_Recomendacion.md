@@ -628,8 +628,8 @@ Scenario: Router clasifica intención y delega
 | US-212 [NUEVA] | Conectar Availability Validator + Scheduling al flujo | Recommendation→Scheduling | Wiring en CoordinatorAgent sobre servicios ya implementados (`scheduling_turn.py`, `openspec/changes/scheduling-wiring-us-212`) | appointments, leads.pipeline_stage | Sí |
 | US-213 [NUEVA] | Reminder Scheduler real (24h/2h) | Transversal a Scheduling | Reemplaza NoOpReminderScheduler | outbox_events | No [GAP], depende de US-212 |
 | AI-105 [NUEVA] | Intent Router (1 llamada LLM, N categorías) | Transversal | Coordinator (diseño, sin código) | ai_decision_traces | No [GAP] |
-| AI-106 [NUEVA] | Knowledge/RAG Service (Objeción + Q&A) | Transversal | Objection Handler + Q&A unificado (diseño, sin código) | knowledge_documents (nueva) | No [GAP], depende de AI-105 |
-| US-214 [NUEVA] | LeadReadinessService (score continuo + financing readiness) | Transversal | Extiende LeadScoringService | buyer_profiles/leads (columnas nuevas) | No [GAP] |
+| AI-106 [Implementado — alcance acotado] | Knowledge/RAG Service (Objeción + Q&A) | Transversal | `KnowledgeService.answer` standalone (RAG extractivo, sin invención de cifras — knowledge-rag-service-ai-106), NO wireado a CoordinatorAgent (falta AI-105) | knowledge_documents (nueva, migración 0021) | Sí (retrieval; wiring pendiente de AI-105) |
+| US-214 [Implementado] | LeadReadinessService (score continuo + financing readiness) | Transversal | Extiende LeadScoringService de forma aditiva (`lead_readiness.py` — lead-readiness-service-us-214) | buyer_profiles.readiness_score / financing_readiness (migración 0020) | Sí |
 | US-215 [ADAPTADA de US-206] | Bajar umbral de Completeness Gate | Discovery→Recommendation | Config de CompletenessGate existente | buyer_profiles, leads, outbox_events | No [config pendiente] |
 | US-216 [ADAPTADA] | Tono conversacional + resumen cada 2 respuestas | Discovery (QUALIFICATION) | Prompt (DEFAULT_SYSTEM_PROMPT) | — | Sí [prompt reescrito] |
 | US-217 [ADAPTADA de US-202..205] | Reordenar preguntas Nivel 1 / Nivel 2 | Discovery (QUALIFICATION) | Orden de extractores existentes | buyer_profiles | No [orquestación pendiente] |
@@ -733,7 +733,18 @@ Scenario: Mensaje ambiguo entre pregunta y objeción
 - (d) [GAP] No implementado. Prerrequisito conceptual de AI-106 (enrutar Objeción vs Q&A) y de un
   agendamiento con lenguaje natural más fino en US-212.
 
-#### AI-106 [NUEVA] — Knowledge/RAG Service unificado (Objection Handler + Q&A informativo)
+#### AI-106 [Implementado — alcance acotado] — Knowledge/RAG Service unificado (Objection Handler + Q&A informativo)
+
+> **2026-07-27 actualización** (`openspec/changes/knowledge-rag-service-ai-106/`): el servicio RAG en sí
+> quedó implementado como `KnowledgeService.answer(organization_id, query, category=None, top_k=3)` en
+> `app/modules/knowledge/` (dominio + repositorio pgvector + servicio de aplicación), tal como preveía la
+> nota de dependencias de Epic 4 ("el servicio RAG se puede prototipar en paralelo con Track A"). La
+> respuesta se ensambla de forma **extractiva** (sin llamada LLM libre) a partir únicamente de los pasajes
+> recuperados, satisfaciendo estructuralmente la regla de "sin cifras no verificadas" sin depender de un
+> guardrail post-hoc. Tabla nueva `knowledge_documents` (migración `0021`, vector(1536) + HNSW + RLS por
+> `organization_id`, mirroring `property_embeddings`). Lo que sigue GAP, sin cambio de alcance: el
+> **wiring** que decide cuándo invocar el servicio (Objeción vs Q&A) sigue bloqueado por AI-105 (Intent
+> Router, no implementado) — `KnowledgeService` no está conectado a `CoordinatorAgent.handle_message`.
 
 Como AI Agent quiero responder objeciones (precio, zona, plusvalía, financiamiento) y preguntas
 informativas del lead con contenido fundamentado en una base de conocimiento aprobada, en vez de solo
@@ -755,10 +766,15 @@ Scenario: Lead pregunta por plusvalía de la zona
   `LeadScoringService.record_objection` (Hot/Warm/Cold, sin dimensión de financiamiento — ver US-214).
   No hay módulo de RAG, vector store de documentos ni `ObjectionHandler`/`KnowledgeService` en el repo
   (confirmado, distinto del pgvector de `property_embeddings` que indexa propiedades, no conocimiento).
-- (c) Tabla nueva a definir (`knowledge_documents` + embeddings), fuera de `property_embeddings`.
-- (d) [GAP] No implementado. Depende de AI-105 para saber cuándo invocarse.
+- (c) Tabla nueva `knowledge_documents` (embedding vector(1536) + HNSW + RLS), fuera de `property_embeddings`.
+- (d) Implementado (retrieval): `KnowledgeService.answer`, `KnowledgeRepository` (pgvector `<->` en
+  Postgres, ranking coseno en Python como fallback en SQLite, mismo patrón de `property_embeddings` —
+  knowledge-rag-service-ai-106); 6 tests cubren aislamiento por organización, filtro por categoría,
+  solo documentos `approved=true`, grounding (la respuesta nunca contiene texto ausente de los pasajes
+  recuperados) y KB vacía. Pendiente (fuera de este change, depende de AI-105): el wiring que decide
+  cuándo invocar el servicio desde `CoordinatorAgent`.
 
-#### US-214 [NUEVA] — LeadReadinessService: score continuo + urgencia + readiness financiera
+#### US-214 [Implementado] — LeadReadinessService: score continuo + urgencia + readiness financiera
 
 Como AI Agent quiero un score continuo ponderado (intención, presupuesto, zona, horizonte, forma de
 pago, decisor) además de la clasificación Hot/Warm/Cold binaria por objeciones, y una readiness
@@ -782,11 +798,15 @@ Scenario: Perfil parcial pero con señales fuertes de urgencia
   en `app/`. Extiende (no reemplaza) `LeadScoringService`
   (`app/modules/lead_qualification/application/lead_scoring.py`, umbrales
   `_HOT_THRESHOLD`/`_WARM_THRESHOLD` ya existentes) — mismo servicio, nueva dimensión de salida.
-- (c) Extiende `buyer_profiles` o `leads` con columna(s) para financing_readiness y el score continuo
-  (migración nueva).
-- (d) [GAP] No implementado. `LeadScoringService.record_objection` hoy solo baja de un score inicial de
-  100 por objeciones (`100 - 15*tipos - 5*total`); no incorpora presupuesto/zona/horizonte/decisor como
-  señales positivas.
+- (c) Extiende `buyer_profiles` con columnas `readiness_score` y `financing_readiness` (migración `0020`,
+  nullable — perfiles existentes simplemente no tienen readiness calculado hasta que `evaluate()` corre).
+- (d) Implementado: `LeadReadinessService.evaluate` (`app/modules/lead_qualification/application/
+  lead_readiness.py` — lead-readiness-service-us-214) suma puntos ponderados por señal (property_type 15,
+  budget 20, locations 15, timeline 2–20 según urgencia, financing_type 8–20 según fuerza, decision_maker_mode
+  10; clamp `[0,100]`) y clasifica `FinancingReadiness` en READY/PRE_READY/DISCOVERY. Aditivo: no modifica
+  `LeadScoringService.record_objection` ni sus umbrales Hot/Warm/Cold existentes (15 tests, incluida
+  regresión de `test_lead_objections.py`). `OwnershipPolicyEngine` confirmado ausente del repo — el
+  resultado queda producido pero sin consumidor todavía (fuera de alcance de este change).
 
 #### US-215 [ADAPTADA — ver US-206] — Bajar el umbral de Completeness Gate (recomendación-first)
 
@@ -818,7 +838,7 @@ Scenario: Perfil con 4 dimensiones núcleo capturadas
 
 ### P2 — Prompt y diseño conversacional (cero cambio de arquitectura)
 
-#### US-216 [ADAPTADA — ver DEFAULT_SYSTEM_PROMPT en prompts.py] — Tono conversacional con resumen cada 2 respuestas
+#### US-216 [Implementado — ver DEFAULT_SYSTEM_PROMPT en prompts.py] — Tono conversacional con resumen cada 2 respuestas
 
 Como lead quiero una conversación fluida (no formulario) con un resumen breve de lo entendido cada 2
 respuestas, en vez de una batería de preguntas secas.
@@ -839,9 +859,12 @@ Scenario: Lead responde 2 preguntas consecutivas
   ya freeform y cubre greeting/qualification/recommendation/handoff en un solo prompt, con override por
   organización vía Prompt Registry en `coordinator.py::_load_system_prompt`).
 - (c) Ninguna tabla nueva; usa el mismo Prompt Registry ya existente.
-- (d) [ADAPTA] Reescritura de contenido del prompt; sin cambio de código en `llm_brain.py` ni en el
-  grafo (§12.1 de Agentic_System.md confirma que el nodo `respond` no decide nada, solo redacta —
-  cambiar tono es 100% prompt).
+- (d) Implementado (conversational-tone-us-216): `DEFAULT_SYSTEM_PROMPT` reescrito con guía de
+  conversación no-formulario, instrucción explícita de resumen cada 2 respuestas consecutivas de
+  calificación, y tono cálido-profesional con uso moderado de emojis; todas las reglas anti-alucinación y
+  anti-inyección existentes se preservaron intactas. Sin cambio de código en `llm_brain.py` ni en el
+  grafo — la cadencia de resumen es auto-rastreada por el LLM vía el historial de la conversación (no
+  existe contador de turnos en el modelo de dominio). 6 tests nuevos en `tests/test_prompts.py`.
 
 #### US-217 [ADAPTADA — ver US-202 a US-205] — Reordenar preguntas: Nivel 1 obligatorio / Nivel 2 refinamiento
 
