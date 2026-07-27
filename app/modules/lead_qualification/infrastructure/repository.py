@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
     DecisionMakerMode,
+    FinancingReadiness,
     FinancingType,
     Lead,
     LeadClassification,
@@ -171,6 +172,26 @@ class BuyerProfileRepository:
         if row is None:
             return False
         row.ai_profile = snapshot
+        return True
+
+    async def set_readiness(
+        self,
+        lead_id: uuid.UUID,
+        *,
+        readiness_score: float,
+        financing_readiness: FinancingReadiness,
+    ) -> bool:
+        """US-214: writes readiness_score/financing_readiness only --
+        design.md Decision 3, same isolated-writer contract as set_ai_profile.
+        Returns False when the lead has no profile row yet."""
+        result = await self._session.execute(
+            select(BuyerProfileORM).where(BuyerProfileORM.lead_id == lead_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.readiness_score = readiness_score
+        row.financing_readiness = financing_readiness.value
         return True
 
     @staticmethod
