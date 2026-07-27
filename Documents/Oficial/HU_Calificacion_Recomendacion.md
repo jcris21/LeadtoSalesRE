@@ -624,11 +624,11 @@ Scenario: Router clasifica intención y delega
 | US-308 | Modelo de embeddings real | Soporte a Recommendation | Infraestructura (`OpenAIEmbeddingModel`, seam async con fallback determinista) | property_embeddings | Sí |
 | US-309 | Reconciliar esquema properties | Soporte a Recommendation | N/A (datos — migración 0010 condicional) | properties | Sí |
 | US-310 | Persistir recommendations | Recommendation (RECOMMENDATION) | `RecommendationService` persiste; Coordinator (AI-104) heredará la orquestación | recommendations (nueva) | Sí |
-| AI-104 | Coordinator Agent + Intent Router | Transversal a toda la Conversation FSM | Coordinator (ya implementado) + Intent Router (`intent-router-ai-104`, clasifica pero aún no enruta) | ai_decision_traces, conversations | Sí (alcance corregido) |
+| AI-104 | Coordinator Agent + Intent Router | Transversal a toda la Conversation FSM | Coordinator (ya implementado) + Intent Router (`intent-router-ai-104`, clasifica y ahora enruta objeción/Q&A — `intent-router-llm-ai-105`) | ai_decision_traces, conversations | Sí (alcance corregido) |
 | US-212 [NUEVA] | Conectar Availability Validator + Scheduling al flujo | Recommendation→Scheduling | Wiring en CoordinatorAgent sobre servicios ya implementados (`scheduling_turn.py`, `openspec/changes/scheduling-wiring-us-212`) | appointments, leads.pipeline_stage | Sí |
 | US-213 [NUEVA] | Reminder Scheduler real (24h/2h) | Transversal a Scheduling | Reemplaza NoOpReminderScheduler | outbox_events | No [GAP], depende de US-212 |
-| AI-105 [NUEVA] | Intent Router (1 llamada LLM, N categorías) | Transversal | Coordinator (diseño, sin código) | ai_decision_traces | No [GAP] |
-| AI-106 [Implementado — alcance acotado] | Knowledge/RAG Service (Objeción + Q&A) | Transversal | `KnowledgeService.answer` standalone (RAG extractivo, sin invención de cifras — knowledge-rag-service-ai-106), NO wireado a CoordinatorAgent (falta AI-105) | knowledge_documents (nueva, migración 0021) | Sí (retrieval; wiring pendiente de AI-105) |
+| AI-105 [Implementado — alcance corregido] | Intent Router (1 llamada LLM, N categorías) | Transversal | Clasificación ya implementada por AI-104; este change wirea la categoría clasificada a `KnowledgeService.answer` para `objecion`/`pregunta_informativa` (`intent-router-llm-ai-105`) | ai_decision_traces | Sí (alcance corregido) |
+| AI-106 [Implementado] | Knowledge/RAG Service (Objeción + Q&A) | Transversal | `KnowledgeService.answer` standalone, ahora wireado a `CoordinatorAgent` para `objecion`/`pregunta_informativa` (`intent-router-llm-ai-105`) | knowledge_documents (nueva, migración 0021) | Sí |
 | US-214 [Implementado] | LeadReadinessService (score continuo + financing readiness) | Transversal | Extiende LeadScoringService de forma aditiva (`lead_readiness.py` — lead-readiness-service-us-214) | buyer_profiles.readiness_score / financing_readiness (migración 0020) | Sí |
 | US-215 [ADAPTADA de US-206] | Bajar umbral de Completeness Gate | Discovery→Recommendation | Config de CompletenessGate existente | buyer_profiles, leads, outbox_events | No [config pendiente] |
 | US-216 [ADAPTADA] | Tono conversacional + resumen cada 2 respuestas | Discovery (QUALIFICATION) | Prompt (DEFAULT_SYSTEM_PROMPT) | — | Sí [prompt reescrito] |
@@ -706,7 +706,21 @@ Scenario: Visita agendada con más de 24h de anticipación
 
 ### P1 — Construcción acotada (diseñada en Agentic_System.md §1–2, pendiente de código)
 
-#### AI-105 [NUEVA] — Intent Router (1 llamada LLM, N categorías)
+#### AI-105 [Implementado — alcance corregido] — Intent Router (1 llamada LLM, N categorías)
+
+> **2026-07-27 corrección de alcance** (`openspec/changes/intent-router-llm-ai-105/`): la
+> clasificación LLM en sí (`IntentRouterPort`/`GeminiIntentRouter`/`KeywordIntentRouter`, 6
+> categorías, superset de las 5 nombradas aquí) YA estaba implementada por `intent-router-ai-104`
+> — la premisa `[NUEVA]`/`[GAP]` original estaba desactualizada. Lo único que faltaba, confirmado
+> por la propia nota de corrección de AI-104 y por el docstring de `knowledge_service.py`
+> ("NOT wired into `CoordinatorAgent.handle_message`"), era que la categoría clasificada
+> determinara alguna rama real. Este change cierra exactamente ese gap: `_classify_intent` ahora
+> retorna la categoría, y `CoordinatorAgent` llama a `KnowledgeService.answer` (AI-106) cuando la
+> categoría es `objecion` o `pregunta_informativa` — la respuesta fundamentada reemplaza la
+> respuesta del LLM conversacional cuando hay match en la KB (`found=True`); sin match o ante
+> cualquier fallo, el comportamiento previo se preserva sin cambios. El resto de categorías
+> (`qualification`, `agendamiento`, `handoff_explicito`, `otro`) permanecen sin rama dedicada —
+> decisión de alcance explícita, ver `design.md` de este change (Non-Goals).
 
 Como sistema quiero clasificar cada mensaje entrante en una categoría de intención (calificación,
 pregunta informativa, objeción, agendamiento, otro) mediante una única llamada LLM ligera, para

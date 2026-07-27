@@ -23,8 +23,10 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.modules.conversation_ownership.application.guardrail import GuardrailInterceptor
 from app.modules.conversation_ownership.application.intent_router import (
+    IntentCategory,
     IntentRouterPort,
     get_default_intent_router,
 )
@@ -36,6 +38,11 @@ from app.modules.conversation_ownership.application.ownership_policy import (
 )
 from app.modules.conversation_ownership.application.scheduling_turn import run_scheduling_turn
 from app.modules.conversation_ownership.application.sidebar import SidebarPublisher
+from app.modules.knowledge.application.knowledge_service import (
+    KnowledgeService,
+    build_default_query_embedder,
+)
+from app.modules.knowledge.domain.models import KnowledgeAnswer
 from app.modules.conversation_ownership.domain.models import (
     Conversation,
     ConversationState,
@@ -75,6 +82,20 @@ logger = logging.getLogger(__name__)
 
 AGENT_NAME = "coordinator"
 
+#: AI-105: the only two `IntentCategory` values that consume `KnowledgeService.answer` this
+#: change — matches the HU doc's own AI-106 Gherkin ("clasifica el mensaje como Objeción o
+#: Pregunta informativa"). See design.md's decision table for why every other category is a
+#: deliberate no-op.
+_KNOWLEDGE_INTENT_CATEGORIES = frozenset({"objecion", "pregunta_informativa"})
+
+
+class KnowledgeAnswererPort(Protocol):
+    """AI-105 seam: `KnowledgeService.answer` already satisfies this structurally (extra
+    defaulted `category`/`top_k` kwargs). Constructor-injectable, same DI pattern as
+    `responder`/`generative_extractor`/`intent_router`."""
+
+    async def answer(self, organization_id: uuid.UUID, query: str) -> KnowledgeAnswer: ...
+
 
 class ResponderPort(Protocol):
     """The conversational brain. Receives the system prompt and the lead's turn;
@@ -113,6 +134,7 @@ class CoordinatorAgent:
         generative_extractor: GenerativeExtractorPort | None = None,
         wacrm_client: WacrmClient | None = None,
         intent_router: IntentRouterPort | None = None,
+        knowledge_answerer: KnowledgeAnswererPort | None = None,
     ):
         from app.modules.conversation_ownership.application.langgraph_responder import (
             get_default_responder,
@@ -126,6 +148,9 @@ class CoordinatorAgent:
         self._generative_extractor = generative_extractor or get_default_generative_extractor()
         self._wacrm_client = wacrm_client
         self._intent_router = intent_router or get_default_intent_router()
+        self._knowledge_answerer = knowledge_answerer or KnowledgeService(
+            session, build_default_query_embedder(get_settings().gemini_api_key)
+        )
         self._conversations = ConversationRepository(session)
         self._decisions = OwnershipDecisionRepository(session)
 
@@ -154,7 +179,7 @@ class CoordinatorAgent:
                     {"action": "guardrail_bypass", "explanation": decision.explanation}
                 )
             else:
-                await self._classify_intent(text, recorder)
+                intent_category = await self._classify_intent(text, recorder)
                 ask_identity, identity_consumed = await self._identity_gate(
                     conversation, text, recorder
                 )
@@ -172,7 +197,12 @@ class CoordinatorAgent:
                         "qualification.run_turn", {"text": text}, qualification.summary()
                     )
                 response = await self._conversational_turn(
-                    conversation, text, qualification, ask_identity=ask_identity, recorder=recorder
+                    conversation,
+                    text,
+                    qualification,
+                    ask_identity=ask_identity,
+                    recorder=recorder,
+                    intent_category=intent_category,
                 )
                 recorder.set_output({"action": "reply", "response": response})
 
@@ -212,18 +242,20 @@ class CoordinatorAgent:
         )
         return decision
 
-    async def _classify_intent(self, text: str, recorder) -> None:
-        """AI-104 (scoped): records the message's classified intent category
-        on this turn's AIDecisionTrace. Additive-only — no branch in this
-        method's caller reads the result yet (design.md Non-Goals); a
-        classifier failure must never affect the reply, same contract as
-        `_build_grounding_note`."""
+    async def _classify_intent(self, text: str, recorder) -> IntentCategory | None:
+        """AI-104 records the message's classified intent category on this
+        turn's AIDecisionTrace. AI-105: the category is now also returned to
+        the caller so `_conversational_turn` can branch on it (see
+        `_knowledge_turn`) — a classifier failure must never affect the
+        reply, same contract as `_build_grounding_note` (returns `None`,
+        exactly as if no classification step existed)."""
         try:
             category = await self._intent_router.classify(text)
         except Exception:  # noqa: BLE001 — classification must never break the turn
             logger.exception("Intent classification failed; continuing without it")
-            return
+            return None
         recorder.record_tool_call("intent_router.classify", {"text": text}, category)
+        return category
 
     async def _identity_gate(
         self, conversation: Conversation, text: str, recorder
@@ -299,6 +331,7 @@ class CoordinatorAgent:
         qualification: QualificationTurnResult | None = None,
         ask_identity: bool = False,
         recorder=None,
+        intent_category: IntentCategory | None = None,
     ) -> str:
         if conversation.state is ConversationState.NEW:
             decision = self._policy_engine.evaluate(OwnershipContext(conversation=conversation))
@@ -356,6 +389,15 @@ class CoordinatorAgent:
         response = await self._responder.respond(
             system_prompt=system_prompt, conversation_id=conversation.id, text=text
         )
+        knowledge_answer = await self._knowledge_turn(
+            conversation, text, intent_category, recorder
+        )
+        if knowledge_answer is not None:
+            # AI-105: a grounded objection/Q&A answer replaces the LLM's freeform
+            # reply — still subordinate to the reprompt/ask_identity overrides
+            # below (design.md precedence: identity > reprompt > knowledge >
+            # default response).
+            response = knowledge_answer
         if qualification is not None and qualification.reprompts:
             # An extractor saw a signal but couldn't validate it (e.g. a broken
             # budget) — its re-prompt IS the right reply this turn. The
@@ -399,6 +441,39 @@ class CoordinatorAgent:
                 reason="SchedulingService.book_visit succeeded",
             )
         return result
+
+    async def _knowledge_turn(
+        self,
+        conversation: Conversation,
+        text: str,
+        intent_category: IntentCategory | None,
+        recorder,
+    ) -> str | None:
+        """AI-105: the sole wired consumer of the classified intent category. Only
+        `objecion`/`pregunta_informativa` reach `KnowledgeService.answer` (design.md decision
+        table — every other category is a deliberate no-op, unchanged from pre-AI-105
+        behavior). A `found=False` result or any lookup failure returns `None`, letting the
+        caller keep its already-computed default responder reply — same
+        never-break-the-turn contract as `_build_grounding_note`/`_identity_gate`."""
+        if intent_category not in _KNOWLEDGE_INTENT_CATEGORIES:
+            return None
+        try:
+            answer = await self._knowledge_answerer.answer(conversation.organization_id, text)
+        except Exception:  # noqa: BLE001 — knowledge lookup must never break the turn
+            logger.exception(
+                "Knowledge lookup failed for conversation %s; continuing without it",
+                conversation.id,
+            )
+            return None
+        if not answer.found:
+            return None
+        if recorder is not None:
+            recorder.record_tool_call(
+                "knowledge.answer",
+                {"text": text, "intent_category": intent_category},
+                f"found:{len(answer.source_document_ids)}",
+            )
+        return answer.answer_text
 
     async def _build_grounding_note(
         self,
