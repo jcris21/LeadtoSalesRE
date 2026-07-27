@@ -233,6 +233,16 @@ class LeadClassification(StrEnum):
     COLD = "cold"
 
 
+class FinancingReadiness(StrEnum):
+    """3-state financing-readiness classification, orthogonal to the
+    Hot/Warm/Cold `LeadClassification` (US-214). See design.md
+    (lead-readiness-service-us-214) Decision 2 for the classification rule."""
+
+    READY = "ready"
+    PRE_READY = "pre_ready"
+    DISCOVERY = "discovery"
+
+
 class Objection(Entity):
     """One detected sales objection, append-only (a lead can raise the same
     `ObjectionType` more than once — each occurrence is its own row)."""

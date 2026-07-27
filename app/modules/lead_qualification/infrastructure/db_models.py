@@ -94,6 +94,11 @@ class BuyerProfileORM(Base):
     #: derived from conversation_memory by ProfileAggregationService — never
     #: written by BuyerProfileCaptureService nor read by completeness().
     ai_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    #: US-214 continuous readiness score (0-100) + financing_readiness tri-state
+    #: (ready/pre_ready/discovery), written solely by LeadReadinessService.evaluate --
+    #: same isolated-writer precedent as ai_profile, never touched by save().
+    readiness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_readiness: Mapped[str | None] = mapped_column(String(16), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
