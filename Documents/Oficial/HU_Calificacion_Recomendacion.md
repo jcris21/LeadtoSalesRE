@@ -631,7 +631,7 @@ Scenario: Router clasifica intención y delega
 | AI-106 [NUEVA] | Knowledge/RAG Service (Objeción + Q&A) | Transversal | Objection Handler + Q&A unificado (diseño, sin código) | knowledge_documents (nueva) | No [GAP], depende de AI-105 |
 | US-214 [NUEVA] | LeadReadinessService (score continuo + financing readiness) | Transversal | Extiende LeadScoringService | buyer_profiles/leads (columnas nuevas) | No [GAP] |
 | US-215 [ADAPTADA de US-206] | Bajar umbral de Completeness Gate | Discovery→Recommendation | Config de CompletenessGate existente | buyer_profiles, leads, outbox_events | No [config pendiente] |
-| US-216 [ADAPTADA] | Tono conversacional + resumen cada 2 respuestas | Discovery (QUALIFICATION) | Prompt (DEFAULT_SYSTEM_PROMPT) | — | No [prompt pendiente] |
+| US-216 [ADAPTADA] | Tono conversacional + resumen cada 2 respuestas | Discovery (QUALIFICATION) | Prompt (DEFAULT_SYSTEM_PROMPT) | — | Sí [prompt reescrito] |
 | US-217 [ADAPTADA de US-202..205] | Reordenar preguntas Nivel 1 / Nivel 2 | Discovery (QUALIFICATION) | Orden de extractores existentes | buyer_profiles | No [orquestación pendiente] |
 | US-218 [ADAPTADA] | Diferir captura de identidad (DNI) | New→Discovery | Reordena Identity Gate en coordinator.py | leads | No [orquestación pendiente] |
 | US-219 [NUEVA] | Motivación + preguntas adaptativas por tipo | Discovery (QUALIFICATION) | Nuevo extractor `extract_motivation` | buyer_profiles (columna nueva) | No [GAP] |
