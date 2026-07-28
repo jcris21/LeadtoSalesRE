@@ -13,13 +13,16 @@ from app.modules.lead_qualification.application.qualification_flow import (
     extract_budget,
     extract_financing_and_decision_mode,
     extract_locations,
+    extract_motivation,
     extract_property_type,
     extract_timeline_and_must_haves,
 )
 from app.modules.lead_qualification.domain.models import (
+    BuyerProfile,
     DecisionMakerMode,
     FinancingType,
     Lead,
+    Motivation,
     MoneyRange,
     ProfilePatch,
     PropertyType,
@@ -450,3 +453,112 @@ def test_deterministic_extractors_run_nivel_2_bedrooms_last():
         _DETERMINISTIC_EXTRACTORS.index(extractor) < bedrooms_index
         for extractor in nivel_1_extractors
     )
+
+
+# --- motivation (US-219) --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Me voy a mudar pronto y necesito un lugar nuevo", Motivation.RELOCATION),
+        ("Estoy buscando un departamento para invertir", Motivation.INVESTMENT),
+        ("Quiero una casa de playa para vacacionar", Motivation.VACATION),
+        ("Es mi primera vivienda, estoy nervioso", Motivation.FIRST_HOME),
+    ],
+)
+async def test_extract_motivation_happy_path(
+    session_factory, seeded_lead, org_id, text, expected
+):
+    async with session_factory() as session:
+        result = await extract_motivation(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text=text,
+        )
+        await session.commit()
+    assert isinstance(result, ProfilePatch)
+    assert result.motivation is expected
+
+    async with session_factory() as session:
+        profile = await BuyerProfileRepository(session).get_by_lead_id(seeded_lead)
+    assert "motivation" in profile.captured_dimensions()
+    assert profile.motivation is expected
+
+
+async def test_extract_motivation_no_signal(session_factory, seeded_lead, org_id):
+    async with session_factory() as session:
+        result = await extract_motivation(
+            session,
+            lead_id=seeded_lead,
+            organization_id=org_id,
+            text="Hola, buenas tardes",
+        )
+    assert result is None
+
+
+async def test_extract_motivation_cross_tenant_extraction_is_rejected(
+    session_factory, seeded_lead
+):
+    other_org_id = new_id()
+    async with session_factory() as session:
+        with pytest.raises(LeadNotFoundError):
+            await extract_motivation(
+                session,
+                lead_id=seeded_lead,
+                organization_id=other_org_id,
+                text="Me voy a mudar pronto",
+            )
+
+
+# --- adaptive Nivel 2 questions by property_type (US-219) ---------------
+
+
+def test_missing_dimensions_excludes_bedrooms_for_land():
+    profile = BuyerProfile(lead_id=new_id(), property_type=PropertyType.LAND)
+    assert "bedrooms" not in profile.missing_dimensions()
+
+
+def test_missing_dimensions_excludes_bedrooms_for_commercial():
+    profile = BuyerProfile(lead_id=new_id(), property_type=PropertyType.COMMERCIAL)
+    assert "bedrooms" not in profile.missing_dimensions()
+
+
+def test_missing_dimensions_keeps_bedrooms_for_apartment_and_house():
+    for property_type in (PropertyType.APARTMENT, PropertyType.HOUSE):
+        profile = BuyerProfile(lead_id=new_id(), property_type=property_type)
+        assert "bedrooms" in profile.missing_dimensions()
+
+
+def test_missing_dimensions_keeps_bedrooms_when_property_type_unknown():
+    profile = BuyerProfile(lead_id=new_id())
+    assert "bedrooms" in profile.missing_dimensions()
+
+
+def test_completeness_reaches_100_without_bedrooms_for_land():
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        property_type=PropertyType.LAND,
+        budget=MoneyRange(minimum=100000, maximum=150000),
+        locations=("Surco",),
+        timeline=Timeline.IMMEDIATE,
+        must_haves=("cochera",),
+        financing_type=FinancingType.CASH,
+        decision_maker_mode=DecisionMakerMode.SOLO,
+        motivation=Motivation.INVESTMENT,
+    )
+    # every dimension except bedrooms is captured, and bedrooms is
+    # inapplicable for LAND, so completeness must reach 100%.
+    assert profile.completeness() == 100.0
+    assert profile.missing_dimensions() == ()
+
+
+def test_completeness_unaffected_for_apartment():
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        property_type=PropertyType.APARTMENT,
+        budget=MoneyRange(minimum=100000, maximum=150000),
+    )
+    # 2 of 9 dimensions captured (property_type + budget), none excluded.
+    assert profile.completeness() == pytest.approx(200.0 / 9.0)

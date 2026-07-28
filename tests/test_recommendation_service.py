@@ -20,6 +20,7 @@ from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
     DecisionMakerMode,
     FinancingType,
+    Motivation,
     MoneyRange,
     PropertyType,
     Timeline,
@@ -57,6 +58,7 @@ def _complete_profile(lead_id: uuid.UUID) -> BuyerProfile:
         financing_type=FinancingType.CASH,
         decision_maker_mode=DecisionMakerMode.SOLO,
         bedrooms=2,
+        motivation=Motivation.FIRST_HOME,
     )
 
 

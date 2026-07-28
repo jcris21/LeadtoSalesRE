@@ -16,6 +16,7 @@ from app.modules.lead_qualification.domain.models import (
     Lead,
     LeadClassification,
     MoneyRange,
+    Motivation,
     Objection,
     ObjectionType,
     PipelineStage,
@@ -158,6 +159,7 @@ class BuyerProfileRepository:
             profile.decision_maker_mode.value if profile.decision_maker_mode else None
         )
         row.bedrooms = profile.bedrooms
+        row.motivation = profile.motivation.value if profile.motivation else None
         row.updated_at = profile.updated_at
 
     async def set_ai_profile(self, lead_id: uuid.UUID, snapshot: dict) -> bool:
@@ -212,6 +214,7 @@ class BuyerProfileRepository:
                 DecisionMakerMode(row.decision_maker_mode) if row.decision_maker_mode else None
             ),
             bedrooms=row.bedrooms,
+            motivation=Motivation(row.motivation) if row.motivation else None,
             updated_at=row.updated_at,
         )
 
