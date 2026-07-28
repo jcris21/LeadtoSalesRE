@@ -69,6 +69,10 @@ async def test_progressive_profiling_one_dimension_at_a_time(session_factory, se
 async def test_profile_completed_fires_exactly_on_crossing_threshold(
     session_factory, seeded_lead
 ):
+    """US-215: with the recalibrated default (80%), ProfileCompleted fires as
+    soon as the 4 primary dimensions (budget, locations, property_type,
+    timeline) are captured — must_haves is a post-Matching refinement and
+    must NOT re-publish the event."""
     async with session_factory() as session:
         service = BuyerProfileCaptureService(session)
         await service.update_profile(seeded_lead, ProfilePatch(budget=MoneyRange(50, 80)))
@@ -76,15 +80,15 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
         await service.update_profile(
             seeded_lead, ProfilePatch(property_type=PropertyType.APARTMENT)
         )
-        await service.update_profile(seeded_lead, ProfilePatch(timeline=Timeline.THREE_MONTHS))
         completeness = await service.update_profile(
-            seeded_lead, ProfilePatch(must_haves=("cochera",))
+            seeded_lead, ProfilePatch(timeline=Timeline.THREE_MONTHS)
         )
-        # A further refinement must NOT re-publish ProfileCompleted.
-        await service.update_profile(seeded_lead, ProfilePatch(locations=("Surco", "Barranco")))
+        # Refinement (must_haves) after the gate already opened must NOT
+        # re-publish ProfileCompleted.
+        await service.update_profile(seeded_lead, ProfilePatch(must_haves=("cochera",)))
         await session.commit()
 
-    assert completeness == 100.0
+    assert completeness == 80.0
     async with session_factory() as session:
         events = (
             (
@@ -96,7 +100,7 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
             .all()
         )
         assert len(events) == 1
-        assert events[0].payload["fields"]["completeness"] == 100.0
+        assert events[0].payload["fields"]["completeness"] == 80.0
 
 
 def test_gate_blocks_incomplete_profile_with_directed_missing_dimension():
@@ -119,4 +123,21 @@ def test_gate_allows_complete_profile():
     result = CompletenessGate(threshold=90.0).can_advance_to_recommendation(profile)
     assert result.can_advance is True
     assert result.completeness == 100.0
+    assert result.missing_dimension is None
+
+
+def test_gate_allows_advance_with_four_primary_dimensions_at_default_threshold():
+    """US-215 Gherkin: budget, locations, property_type, and timeline
+    captured (must_haves NOT captured) must be enough to advance to
+    Recommendation under the recalibrated platform-default threshold (80%)."""
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        budget=MoneyRange(50, 80),
+        locations=("Surco",),
+        property_type=PropertyType.HOUSE,
+        timeline=Timeline.IMMEDIATE,
+    )
+    result = CompletenessGate().can_advance_to_recommendation(profile)
+    assert result.can_advance is True
+    assert result.completeness == 80.0
     assert result.missing_dimension is None

@@ -38,7 +38,11 @@ class Settings(BaseSettings):
     wacrm_base_url: str = "http://localhost:8080"
     crm_sync_poll_interval_seconds: float = 30.0
     crm_staleness_threshold_seconds: int = 60  # QA-13 staleness bound
-    profile_completeness_threshold: float = 90.0  # QA-14 gate, percent
+    # QA-14 gate, percent. 80.0 = 4 of the 5 BuyerProfile dimensions
+    # (budget, locations, property_type, timeline) captured — US-215
+    # recalibration for a recommendation-first flow; `must_haves` becomes a
+    # post-Matching refinement dimension (Nivel 2, US-217).
+    profile_completeness_threshold: float = 80.0
 
     # Event bus / outbox worker
     outbox_poll_interval_seconds: float = 1.0
