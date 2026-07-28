@@ -633,7 +633,7 @@ Scenario: Router clasifica intención y delega
 | US-215 [ADAPTADA de US-206] | Bajar umbral de Completeness Gate | Discovery→Recommendation | Config de CompletenessGate existente | buyer_profiles, leads, outbox_events | No [config pendiente] |
 | US-216 [ADAPTADA] | Tono conversacional + resumen cada 2 respuestas | Discovery (QUALIFICATION) | Prompt (DEFAULT_SYSTEM_PROMPT) | — | Sí [prompt reescrito] |
 | US-217 [ADAPTADA de US-202..205] | Reordenar preguntas Nivel 1 / Nivel 2 | Discovery (QUALIFICATION) | Orden de extractores existentes | buyer_profiles | No [orquestación pendiente] |
-| US-218 [ADAPTADA] | Diferir captura de identidad (DNI) | New→Discovery | Reordena Identity Gate en coordinator.py | leads | No [orquestación pendiente] |
+| US-218 [Implementado] | Diferir captura de identidad (DNI) | New→Discovery | Reordena Identity Gate en coordinator.py | leads | Sí [`_dni_gate` + `REPROMPT_DNI`] |
 | US-219 [NUEVA] | Motivación + preguntas adaptativas por tipo | Discovery (QUALIFICATION) | Nuevo extractor `extract_motivation` | buyer_profiles (columna nueva) | No [GAP] |
 | US-220 [NUEVA] | Turno de profundización pre-agenda | Recommendation→Scheduling | Prompt/orquestación tras el narrator | — | No [GAP], depende de US-212 |
 | US-221 [ADAPTADA de US-212] | Invitación conversacional a visita | Recommendation→Scheduling | Prompt sobre wiring de US-212 | — | No [bloqueada por US-212] |
@@ -909,7 +909,7 @@ Scenario: Conversación nueva sin perfil previo
 - (d) [ADAPTA] Cambio de orquestación/prompt, no de dominio — `BuyerProfile.apply(patch)` ya soporta
   actualización parcial e incremental, requisito para que Nivel 2 llegue después sin bloquear.
 
-#### US-218 [ADAPTADA — ver Identity Gate en coordinator.py] — Mover captura de identidad después de mostrar valor
+#### US-218 [Implementado — ver Identity Gate en coordinator.py] — Mover captura de identidad después de mostrar valor
 
 Como lead quiero que no se me pida DNI/nombre completo en el primer turno, sino después de recibir una
 recomendación o valor percibido, para reducir abandono temprano.
@@ -930,9 +930,14 @@ Scenario: Primer turno del lead
   `extract_identity` (`coordinator.py`), que hoy corre siempre antes de `run_qualification_turn`;
   no elimina la captura, solo reordena qué campos son obligatorios en qué turno.
 - (c) `leads` (sin cambio de esquema).
-- (d) [ADAPTA] Requiere decidir qué campo mínimo sigue siendo obligatorio para `LeadSyncAdapter.create_lead`
-  (wacrm probablemente exige algún identificador) — a validar contra el contrato real de wacrm antes de
-  implementar.
+- (d) Implementado: se validó el contrato real de wacrm (`WacrmClient.create_lead` /
+  `WACRM_API_Adaptation_Plan.md`) — `POST /deals` exige `contact_phone` (ya conocido del canal) y
+  `contact_name` (`str` no-opcional); `contact_dni` ya era opcional. Conclusión: el nombre sigue siendo
+  el identificador mínimo real, el DNI es lo único diferible. `REPROMPT_IDENTITY` ya no menciona el DNI
+  en el turno 1; nuevo `REPROMPT_DNI` se muestra solo una vez `conversation.state == RECOMMENDATION`
+  (`CoordinatorAgent._dni_gate`), de forma aditiva (no bloquea calificación/agendamiento). Sin cambio de
+  esquema en `leads` — el propio estado `RECOMMENDATION` acota la ventana de la pregunta. Tests:
+  `tests/test_coordinator_dni_gate.py`, `tests/test_coordinator_identity_gate.py`.
 
 #### US-219 [NUEVA] — Motivación de compra y preguntas adaptativas por tipo de propiedad
 

@@ -15,10 +15,27 @@ import re
 from dataclasses import dataclass
 
 #: The Coordinator's reply while a conversation has no linked Lead: the
-#: welcome message asks the contact to leave their name (G8 flow).
+#: welcome message asks the contact to leave their name (G8 flow). US-218:
+#: DNI is deliberately NOT mentioned here — it is the one identity field
+#: deferred past the first turn (HU_Calificacion_Recomendacion.md US-218),
+#: requested later via `REPROMPT_DNI` once a recommendation/value moment has
+#: been shown. Name stays mandatory on turn 1: it is the minimal identifier
+#: `LeadSyncAdapter.create_lead`/wacrm's `/deals` contract actually requires
+#: alongside the channel's own phone (`contact_reference`, already known
+#: before any reply — see wacrm_client.py's `create_lead` docstring).
 REPROMPT_IDENTITY = (
     "¡Hola! Soy el asistente del equipo de asesores. Para poder ayudarte, "
-    "¿me compartes tu nombre completo? Si deseas, también tu DNI."
+    "¿me compartes tu nombre completo?"
+)
+
+#: US-218 deferred ask: shown only once the conversation has reached the
+#: RECOMMENDATION state (a Top-3/value moment has already been delivered).
+#: Additive, never blocking — a missing DNI must not stop qualification,
+#: scheduling or the conversational reply (unlike the name gate above, which
+#: legitimately blocks until a Lead exists to attach a reply to).
+REPROMPT_DNI = (
+    "Para dejar tu perfil completo de cara a coordinar una visita, "
+    "¿me compartes tu DNI? Si prefieres, podemos seguir sin él por ahora."
 )
 
 
@@ -110,3 +127,13 @@ def extract_identity(text: str) -> IdentityCapture | None:
         return None
     dni_match = _DNI_RE.search(stripped)
     return IdentityCapture(full_name=name, dni=dni_match.group(0) if dni_match else None)
+
+
+def extract_dni(text: str) -> str | None:
+    """US-218 deferred capture: once identity (name) is already established and
+    a value moment has been shown, a later message may carry just the DNI on
+    its own, with no name alongside it. Reuses the same 8-digit-standalone
+    recognition `extract_identity` uses, without requiring a name in the same
+    message."""
+    match = _DNI_RE.search(text.strip())
+    return match.group(0) if match else None

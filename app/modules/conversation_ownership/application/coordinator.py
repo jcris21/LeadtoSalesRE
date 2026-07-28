@@ -56,7 +56,9 @@ from app.modules.conversation_ownership.infrastructure.repository import (
 )
 from app.modules.conversation_ownership.application.lead_linker import LeadLinker
 from app.modules.lead_qualification.application.identity_extraction import (
+    REPROMPT_DNI,
     REPROMPT_IDENTITY,
+    extract_dni,
     extract_identity,
 )
 from app.modules.lead_qualification.application.lead_sync import LeadSyncAdapter
@@ -87,6 +89,15 @@ AGENT_NAME = "coordinator"
 #: Pregunta informativa"). See design.md's decision table for why every other category is a
 #: deliberate no-op.
 _KNOWLEDGE_INTENT_CATEGORIES = frozenset({"objecion", "pregunta_informativa"})
+
+#: US-218: the DNI nudge only fires once a recommendation/value moment has
+#: been shown (HU_Calificacion_Recomendacion.md US-218's Gherkin: "se pospone
+#: hasta después de GeminiRecommendationNarrator.narrate o de un intercambio
+#: de valor equivalente"). Confined to RECOMMENDATION itself — not the states
+#: after it (Appointment, Visit, ...) — so the nudge has a naturally bounded
+#: window without needing a new `leads` column to remember "already asked"
+#: (US-218's own alignment note (d): no schema change for this change).
+_DNI_ELIGIBLE_STATES = frozenset({ConversationState.RECOMMENDATION})
 
 
 class KnowledgeAnswererPort(Protocol):
@@ -183,13 +194,14 @@ class CoordinatorAgent:
                 ask_identity, identity_consumed = await self._identity_gate(
                     conversation, text, recorder
                 )
-                # A message consumed as identity (name/DNI) is not a
-                # qualification signal: the 8-digit DNI would reach the budget
-                # extractor and corrupt the profile. Qualification starts on
-                # the NEXT message.
+                dni_nudge, dni_consumed = await self._dni_gate(conversation, text, recorder)
+                # A message consumed as identity (name/DNI) or as a deferred
+                # DNI reply is not a qualification signal: the 8-digit DNI
+                # would reach the budget extractor and corrupt the profile.
+                # Qualification starts on the NEXT message.
                 qualification = (
                     None
-                    if identity_consumed
+                    if identity_consumed or dni_consumed
                     else await self._qualification_turn(conversation, text)
                 )
                 if qualification is not None:
@@ -201,6 +213,7 @@ class CoordinatorAgent:
                     text,
                     qualification,
                     ask_identity=ask_identity,
+                    dni_nudge=dni_nudge,
                     recorder=recorder,
                     intent_category=intent_category,
                 )
@@ -302,6 +315,27 @@ class CoordinatorAgent:
         )
         return False, True
 
+    async def _dni_gate(
+        self, conversation: Conversation, text: str, recorder
+    ) -> tuple[str | None, bool]:
+        """US-218: deferred DNI ask. Unlike `_identity_gate`'s name gate (which
+        legitimately blocks the reply until a Lead exists to attach it to), a
+        missing DNI must never block qualification, scheduling or the
+        conversational reply — it is additive-only, appended by
+        `_conversational_turn`. Only eligible once a recommendation/value
+        moment has been shown (`_DNI_ELIGIBLE_STATES`); before that, both
+        return values are inert. Returns `(nudge, dni_consumed)`: `nudge` is
+        the text to append this turn (or None), `dni_consumed` mirrors
+        `identity_consumed` above — a message recognized as carrying the DNI
+        answer is not a qualification signal either."""
+        if conversation.lead_id is None or conversation.state not in _DNI_ELIGIBLE_STATES:
+            return None, False
+        dni = extract_dni(text)
+        if dni is not None:
+            recorder.record_tool_call("identity.capture_dni", {"text": text}, f"dni:{dni}")
+            return None, True
+        return REPROMPT_DNI, False
+
     async def _build_wacrm_client(self, organization_id: uuid.UUID) -> WacrmClient:
         from app.modules.lead_qualification.wiring import build_wacrm_client
 
@@ -330,6 +364,7 @@ class CoordinatorAgent:
         text: str,
         qualification: QualificationTurnResult | None = None,
         ask_identity: bool = False,
+        dni_nudge: str | None = None,
         recorder=None,
         intent_category: IntentCategory | None = None,
     ) -> str:
@@ -408,6 +443,15 @@ class CoordinatorAgent:
             # name (mutually exclusive with qualification re-prompts, which
             # require a linked lead).
             response = REPROMPT_IDENTITY
+        elif dni_nudge:
+            # US-218: additive-only — a value moment has already been shown
+            # (RECOMMENDATION), so the reply keeps whatever it already was
+            # (recommendation follow-up, scheduling, knowledge answer, ...)
+            # and the deferred DNI ask rides along as a second line, never
+            # replacing it (mutually exclusive with `ask_identity`: that gate
+            # requires no Lead, this one requires a linked Lead already in
+            # RECOMMENDATION).
+            response = f"{response}\n\n{dni_nudge}"
         response = await guard_reply(
             self._session, organization_id=conversation.organization_id, reply=response
         )
