@@ -140,16 +140,49 @@ def test_gate_allows_complete_profile():
 def test_profile_dimensions_now_has_eight_elements():
     from app.modules.lead_qualification.domain.models import PROFILE_DIMENSIONS
 
+    # US-217: Nivel 1 (qualification-blocking) dimensions precede Nivel 2
+    # (refinement) dimensions -- must_haves/bedrooms sort last.
     assert PROFILE_DIMENSIONS == (
         "budget",
         "locations",
         "property_type",
         "timeline",
-        "must_haves",
         "financing_type",
         "decision_maker_mode",
+        "must_haves",
         "bedrooms",
     )
+
+
+# --- US-217: Nivel 1 / Nivel 2 precedence -------------------------------
+
+
+def test_gate_prefers_nivel_1_missing_dimension_over_nivel_2():
+    """When both a Nivel 1 (financing_type) and a Nivel 2 (must_haves)
+    dimension are missing, the directed question must target Nivel 1 first."""
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        budget=MoneyRange(50, 80),
+        locations=("Surco",),
+        property_type=PropertyType.HOUSE,
+        timeline=Timeline.IMMEDIATE,
+        decision_maker_mode=DecisionMakerMode.SOLO,
+        bedrooms=3,
+        # must_haves and financing_type intentionally left uncaptured.
+    )
+    result = CompletenessGate(threshold=90.0).can_advance_to_recommendation(profile)
+    assert result.can_advance is False
+    assert result.missing_dimension == "financing_type"
+
+
+def test_missing_dimensions_lists_nivel_1_before_nivel_2():
+    profile = BuyerProfile(lead_id=new_id())
+    missing = profile.missing_dimensions()
+    nivel_1 = ("budget", "locations", "property_type", "timeline", "financing_type", "decision_maker_mode")
+    nivel_2 = ("must_haves", "bedrooms")
+    last_nivel_1_index = max(missing.index(dim) for dim in nivel_1)
+    first_nivel_2_index = min(missing.index(dim) for dim in nivel_2)
+    assert last_nivel_1_index < first_nivel_2_index
 
 
 def test_original_five_dimensions_no_longer_report_full_completeness():
