@@ -85,6 +85,13 @@ class QualificationTurnResult:
         return " ".join(parts)
 
 
+#: US-217: Nivel 1 (qualification-blocking) extractors before Nivel 2
+#: (refinement) extractors, mirroring `PROFILE_DIMENSIONS`'s order in
+#: `domain/models.py`. `extract_timeline_and_must_haves` stays a single call
+#: (splitting timeline from must_haves would be new domain logic, out of
+#: scope for US-217) but its Nivel 1 signal (timeline) still lands before the
+#: Nivel 2-only `extract_bedrooms`. `extract_budget` (also Nivel 1) is
+#: conditionally inserted at index 0 below when `has_budget_signal` matches.
 _DETERMINISTIC_EXTRACTORS = (
     extract_locations,
     extract_property_type,

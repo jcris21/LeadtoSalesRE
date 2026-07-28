@@ -74,14 +74,23 @@ class DecisionMakerMode(StrEnum):
 #: The eight dimensions progressive profiling must fill (Architecture.md §6.2,
 #: extended by US-208 with financing_type and decision_maker_mode, and by the
 #: 2026-07-19 E2E review with bedrooms).
+#:
+#: US-217: ordered Nivel 1 (qualification-blocking) before Nivel 2 (refinement),
+#: so `missing_dimensions()[0]` (the directed next question, see
+#: `CompletenessGate`) always exhausts Nivel 1 first. Nivel 1 is exactly the six
+#: signals `LeadReadinessService` (US-214) weights — intención/property_type,
+#: presupuesto/budget, zona/locations, horizonte/timeline, forma de
+#: pago/financing_type, decisor/decision_maker_mode. `must_haves` and `bedrooms`
+#: are Nivel 2 refinement (asked as post-recommendation follow-up once the
+#: US-215 completeness threshold is reached), so they sort last.
 PROFILE_DIMENSIONS: tuple[str, ...] = (
     "budget",
     "locations",
     "property_type",
     "timeline",
-    "must_haves",
     "financing_type",
     "decision_maker_mode",
+    "must_haves",
     "bedrooms",
 )
 
