@@ -71,9 +71,18 @@ class DecisionMakerMode(StrEnum):
     FAMILY = "family"
 
 
-#: The eight dimensions progressive profiling must fill (Architecture.md §6.2,
-#: extended by US-208 with financing_type and decision_maker_mode, and by the
-#: 2026-07-19 E2E review with bedrooms).
+class Motivation(StrEnum):
+    """Why the buyer is purchasing — ninth profile dimension (US-219)."""
+
+    RELOCATION = "relocation"
+    INVESTMENT = "investment"
+    VACATION = "vacation"
+    FIRST_HOME = "first_home"
+
+
+#: The nine dimensions progressive profiling must fill (Architecture.md §6.2,
+#: extended by US-208 with financing_type and decision_maker_mode, by the
+#: 2026-07-19 E2E review with bedrooms, and by US-219 with motivation).
 PROFILE_DIMENSIONS: tuple[str, ...] = (
     "budget",
     "locations",
@@ -83,7 +92,19 @@ PROFILE_DIMENSIONS: tuple[str, ...] = (
     "financing_type",
     "decision_maker_mode",
     "bedrooms",
+    "motivation",
 )
+
+#: US-219: dimensions that do not apply to certain property types, excluded
+#: from `missing_dimensions()`/`completeness()` so the Coordinator never asks
+#: (or holds a profile incomplete for) an irrelevant Nivel 2 question — e.g. a
+#: land/commercial purchase has no bedroom count to ask about (the closest
+#: existing dimension to the HU's "no preguntar piso si es casa" example,
+#: since this codebase has no separate floor/piso dimension).
+_INAPPLICABLE_DIMENSIONS_BY_PROPERTY_TYPE: dict[PropertyType, frozenset[str]] = {
+    PropertyType.LAND: frozenset({"bedrooms"}),
+    PropertyType.COMMERCIAL: frozenset({"bedrooms"}),
+}
 
 
 class ProfileValidationError(ValueError):
@@ -119,6 +140,7 @@ class ProfilePatch(ValueObject):
     financing_type: FinancingType | None = None
     decision_maker_mode: DecisionMakerMode | None = None
     bedrooms: int | None = None
+    motivation: Motivation | None = None
 
     def __post_init__(self) -> None:
         if self.locations is not None and not self.locations:
@@ -151,6 +173,7 @@ class BuyerProfile(Entity):
         financing_type: FinancingType | None = None,
         decision_maker_mode: DecisionMakerMode | None = None,
         bedrooms: int | None = None,
+        motivation: Motivation | None = None,
         updated_at: datetime | None = None,
     ) -> None:
         self.id = id or new_id()
@@ -163,6 +186,7 @@ class BuyerProfile(Entity):
         self.financing_type = financing_type
         self.decision_maker_mode = decision_maker_mode
         self.bedrooms = bedrooms
+        self.motivation = motivation
         self.updated_at = updated_at or utcnow()
 
     def apply(self, patch: ProfilePatch) -> None:
@@ -182,6 +206,8 @@ class BuyerProfile(Entity):
             self.decision_maker_mode = patch.decision_maker_mode
         if patch.bedrooms is not None:
             self.bedrooms = patch.bedrooms
+        if patch.motivation is not None:
+            self.motivation = patch.motivation
         self.updated_at = utcnow()
 
     def captured_dimensions(self) -> tuple[str, ...]:
@@ -202,15 +228,35 @@ class BuyerProfile(Entity):
             captured.append("decision_maker_mode")
         if self.bedrooms is not None:
             captured.append("bedrooms")
+        if self.motivation is not None:
+            captured.append("motivation")
         return tuple(captured)
+
+    def _inapplicable_dimensions(self) -> frozenset[str]:
+        """US-219: dimensions that do not apply to this profile's
+        `property_type` (e.g. `bedrooms` for LAND/COMMERCIAL). Unknown/absent
+        `property_type` excludes nothing — filtering only kicks in once the
+        type is actually known."""
+        if self.property_type is None:
+            return frozenset()
+        return _INAPPLICABLE_DIMENSIONS_BY_PROPERTY_TYPE.get(self.property_type, frozenset())
 
     def missing_dimensions(self) -> tuple[str, ...]:
         captured = set(self.captured_dimensions())
-        return tuple(d for d in PROFILE_DIMENSIONS if d not in captured)
+        inapplicable = self._inapplicable_dimensions()
+        return tuple(
+            d for d in PROFILE_DIMENSIONS if d not in captured and d not in inapplicable
+        )
 
     def completeness(self) -> float:
-        """Percent of required dimensions captured, 0.0–100.0."""
-        return 100.0 * len(self.captured_dimensions()) / len(PROFILE_DIMENSIONS)
+        """Percent of required dimensions captured, 0.0–100.0. Dimensions that
+        do not apply to this profile's `property_type` (US-219) are excluded
+        from the denominator so a lead can reach 100% without ever answering
+        an irrelevant Nivel 2 question."""
+        applicable_total = len(PROFILE_DIMENSIONS) - len(self._inapplicable_dimensions())
+        if applicable_total <= 0:
+            return 100.0
+        return 100.0 * len(self.captured_dimensions()) / applicable_total
 
 
 class ObjectionType(StrEnum):

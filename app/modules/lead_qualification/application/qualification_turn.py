@@ -33,6 +33,7 @@ from app.modules.lead_qualification.application.qualification_flow import (
     extract_budget,
     extract_financing_and_decision_mode,
     extract_locations,
+    extract_motivation,
     extract_objection,
     extract_property_type,
     extract_timeline_and_must_haves,
@@ -91,6 +92,7 @@ _DETERMINISTIC_EXTRACTORS = (
     extract_timeline_and_must_haves,
     extract_financing_and_decision_mode,
     extract_bedrooms,
+    extract_motivation,
 )
 
 

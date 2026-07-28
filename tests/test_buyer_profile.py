@@ -15,6 +15,7 @@ from app.modules.lead_qualification.domain.models import (
     DecisionMakerMode,
     FinancingType,
     Lead,
+    Motivation,
     MoneyRange,
     ProfilePatch,
     ProfileValidationError,
@@ -64,8 +65,8 @@ async def test_progressive_profiling_one_dimension_at_a_time(session_factory, se
         )
         c2 = await service.update_profile(seeded_lead, ProfilePatch(locations=("Miraflores",)))
         await session.commit()
-    assert c1 == pytest.approx(100.0 / 8)
-    assert c2 == pytest.approx(200.0 / 8)
+    assert c1 == pytest.approx(100.0 / 9)
+    assert c2 == pytest.approx(200.0 / 9)
 
 
 async def test_profile_completed_fires_exactly_on_crossing_threshold(
@@ -86,6 +87,9 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
             seeded_lead, ProfilePatch(decision_maker_mode=DecisionMakerMode.SOLO)
         )
         await service.update_profile(seeded_lead, ProfilePatch(bedrooms=2))
+        await service.update_profile(
+            seeded_lead, ProfilePatch(motivation=Motivation.FIRST_HOME)
+        )
         completeness = await service.update_profile(
             seeded_lead, ProfilePatch(must_haves=("cochera",))
         )
@@ -112,7 +116,7 @@ def test_gate_blocks_incomplete_profile_with_directed_missing_dimension():
     profile = BuyerProfile(lead_id=new_id(), budget=MoneyRange(50, 80), locations=("Surco",))
     result = CompletenessGate(threshold=90.0).can_advance_to_recommendation(profile)
     assert result.can_advance is False
-    assert result.completeness == pytest.approx(200.0 / 8)
+    assert result.completeness == pytest.approx(200.0 / 9)
     assert result.missing_dimension == "property_type"
 
 
@@ -127,6 +131,7 @@ def test_gate_allows_complete_profile():
         financing_type=FinancingType.CASH,
         decision_maker_mode=DecisionMakerMode.SOLO,
         bedrooms=3,
+        motivation=Motivation.FIRST_HOME,
     )
     result = CompletenessGate(threshold=90.0).can_advance_to_recommendation(profile)
     assert result.can_advance is True
@@ -137,7 +142,7 @@ def test_gate_allows_complete_profile():
 # --- US-208: financing_type / decision_maker_mode dimensions -----------
 
 
-def test_profile_dimensions_now_has_eight_elements():
+def test_profile_dimensions_now_has_nine_elements():
     from app.modules.lead_qualification.domain.models import PROFILE_DIMENSIONS
 
     assert PROFILE_DIMENSIONS == (
@@ -149,6 +154,7 @@ def test_profile_dimensions_now_has_eight_elements():
         "financing_type",
         "decision_maker_mode",
         "bedrooms",
+        "motivation",
     )
 
 
@@ -161,12 +167,13 @@ def test_original_five_dimensions_no_longer_report_full_completeness():
         timeline=Timeline.IMMEDIATE,
         must_haves=("jardín",),
     )
-    assert profile.completeness() == pytest.approx(500.0 / 8)
+    assert profile.completeness() == pytest.approx(500.0 / 9)
     assert profile.completeness() < 100.0
     assert set(profile.missing_dimensions()) == {
         "financing_type",
         "decision_maker_mode",
         "bedrooms",
+        "motivation",
     }
 
 

@@ -15,6 +15,7 @@ from app.modules.lead_qualification.domain.models import (
     DecisionMakerMode,
     FinancingType,
     Lead,
+    Motivation,
     MoneyRange,
     ProfilePatch,
     PropertyType,
@@ -117,6 +118,8 @@ async def test_e2e_script_fills_profile_and_fires_profile_completed(session_fact
         assert profile.must_haves == ("cochera", "balcon")
         assert profile.financing_type is FinancingType.MORTGAGE_APPROVED
         assert profile.decision_maker_mode is DecisionMakerMode.COUPLE
+        # "Quisiera mudarme en 3 meses" also carries a relocation signal (US-219).
+        assert profile.motivation is Motivation.RELOCATION
 
         completed = (
             (

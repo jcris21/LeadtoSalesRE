@@ -38,6 +38,7 @@ from app.modules.lead_qualification.domain.models import (
     DecisionMakerMode,
     FinancingType,
     MoneyRange,
+    Motivation,
     ObjectionType,
     ProfilePatch,
     ProfileValidationError,
@@ -139,6 +140,38 @@ _DECISION_MODE_KEYWORDS: tuple[tuple[str, DecisionMakerMode], ...] = (
     ("decido solo", DecisionMakerMode.SOLO),
     ("decido sola", DecisionMakerMode.SOLO),
     ("solo yo decido", DecisionMakerMode.SOLO),
+)
+
+#: US-219: purchase motivation, keyword-first (mirrors `_PROPERTY_TYPE_KEYWORDS`).
+#: Longer/more specific phrases are listed before shorter ones so the
+#: "first mention wins" scan (`_extract_motivation`) prefers the most
+#: specific match when multiple keywords could overlap in the same message.
+_MOTIVATION_KEYWORDS: tuple[tuple[str, Motivation], ...] = (
+    ("es mi primera vivienda", Motivation.FIRST_HOME),
+    ("es mi primer departamento", Motivation.FIRST_HOME),
+    ("es mi primera casa", Motivation.FIRST_HOME),
+    ("mi primera propiedad", Motivation.FIRST_HOME),
+    ("primera vivienda", Motivation.FIRST_HOME),
+    ("primer hogar", Motivation.FIRST_HOME),
+    ("nos vamos a mudar", Motivation.RELOCATION),
+    ("me voy a mudar", Motivation.RELOCATION),
+    ("necesito mudarme", Motivation.RELOCATION),
+    ("quisiera mudarme", Motivation.RELOCATION),
+    ("cambio de casa", Motivation.RELOCATION),
+    ("mudanza", Motivation.RELOCATION),
+    ("mudarme", Motivation.RELOCATION),
+    ("mudarnos", Motivation.RELOCATION),
+    ("para invertir", Motivation.INVESTMENT),
+    ("como inversion", Motivation.INVESTMENT),
+    ("para alquilarlo", Motivation.INVESTMENT),
+    ("para poner en alquiler", Motivation.INVESTMENT),
+    ("inversion inmobiliaria", Motivation.INVESTMENT),
+    ("casa de playa", Motivation.VACATION),
+    ("casa de campo", Motivation.VACATION),
+    ("para vacacionar", Motivation.VACATION),
+    ("segunda vivienda", Motivation.VACATION),
+    ("para veranear", Motivation.VACATION),
+    ("uso vacacional", Motivation.VACATION),
 )
 
 _OBJECTION_KEYWORDS: tuple[tuple[str, ObjectionType], ...] = (
@@ -493,6 +526,42 @@ async def extract_bedrooms(
         patch = ProfilePatch(bedrooms=count)
     except ProfileValidationError:
         return None
+
+    service = BuyerProfileCaptureService(session)
+    await service.update_profile(lead_id, patch)
+    return patch
+
+
+def _extract_motivation(normalized_text: str) -> Motivation | None:
+    best_index: int | None = None
+    best_motivation: Motivation | None = None
+    for keyword, motivation in _MOTIVATION_KEYWORDS:
+        index = normalized_text.find(_normalize(keyword))
+        if index != -1 and (best_index is None or index < best_index):
+            best_index = index
+            best_motivation = motivation
+    return best_motivation
+
+
+async def extract_motivation(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    text: str,
+) -> ExtractionResult:
+    """US-219: closed-enum purchase-motivation classification (mudanza,
+    inversion, vacacional, primera vivienda), keyword-first — mirrors
+    `extract_property_type`."""
+    motivation = _extract_motivation(_normalize(text))
+    if motivation is None:
+        return None
+
+    await _assert_tenant(session, lead_id, organization_id)
+    try:
+        patch = ProfilePatch(motivation=motivation)
+    except ProfileValidationError:
+        return None  # unreachable: motivation is a plain enum, no shape validation
 
     service = BuyerProfileCaptureService(session)
     await service.update_profile(lead_id, patch)

@@ -90,6 +90,10 @@ class BuyerProfileORM(Base):
     financing_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decision_maker_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     bedrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: US-219 purchase motivation (relocation/investment/vacation/first_home),
+    #: same capture pattern as `timeline`/`financing_type` — not an
+    #: isolated-writer snapshot like `ai_profile`/`readiness_score`.
+    motivation: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: US-211 affinity snapshot (modern_score/family_score/confidence),
     #: derived from conversation_memory by ProfileAggregationService — never
     #: written by BuyerProfileCaptureService nor read by completeness().

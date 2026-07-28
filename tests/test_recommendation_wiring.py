@@ -18,6 +18,7 @@ from app.modules.lead_qualification.domain.models import (
     DecisionMakerMode,
     FinancingType,
     Lead,
+    Motivation,
     MoneyRange,
     PropertyType,
     Timeline,
@@ -83,6 +84,7 @@ async def complete_profile(session_factory, seeded_org, seeded_lead):
         financing_type=FinancingType.CASH,
         decision_maker_mode=DecisionMakerMode.SOLO,
         bedrooms=2,
+        motivation=Motivation.FIRST_HOME,
     )
     async with session_factory() as session:
         await BuyerProfileRepository(session).save(seeded_org, profile)
