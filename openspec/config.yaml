@@ -1,64 +1,54 @@
-cat > openspec/config.yml << 'EOF'
 context: |
-Project: LeadtoSalesRE — AI-native omnichannel real estate lead qualification platform
-Architecture: Modular Monolith, DDD, 7 bounded contexts, Sprint 0→5 roadmap
-Stack: FastAPI (Python 3.12 / uv) + SQLAlchemy async + PostgreSQL/Supabase
-+ Alembic + pgvector + LangGraph + OpenTelemetry + Chatwoot + wacrm
-Package manager: uv (NEVER bare pip)
-All code, comments, ADRs, and commits in English.
+  Project: LeadtoSalesRE — AI-native omnichannel real estate lead qualification platform
+  Architecture: Modular Monolith, DDD, 7 bounded contexts, Sprint 0→5 roadmap
+  Stack: FastAPI (Python 3.12 / uv) + SQLAlchemy async + PostgreSQL/Supabase
+  + Alembic + pgvector + LangGraph + OpenTelemetry + Chatwoot + wacrm
+  Package manager: uv (NEVER bare pip)
+  All code, comments, ADRs, and commits in English.
 
-Read before ANY artifact:
+  Read before ANY artifact:
 
+  docs/base-standards.md          — core principles, DDD rules, Alembic/LangGraph patterns
+  Documents/Oficial/Architecture.md       — bounded context boundaries and contracts
+  Documents/Oficial/Agentic_System.md     — LangGraph graph definitions and agent roles
+  Documents/Oficial/ArchitecturalDrivers.md — non-functional requirements and constraints
+  docs/FEATURE_INTAKE.md          — risk classification before implementation
+  docs/TEST_MATRIX.md             — proof requirements per bounded context
 
-docs/base-standards.md          — core principles, DDD rules, Alembic/LangGraph patterns
-Documents/Oficial/Architecture.md       — bounded context boundaries and contracts
-Documents/Oficial/Agentic_System.md     — LangGraph graph definitions and agent roles
-Documents/Oficial/ArchitecturalDrivers.md — non-functional requirements and constraints
-docs/FEATURE_INTAKE.md          — risk classification before implementation
-docs/TEST_MATRIX.md             — proof requirements per bounded context
+  Sprint roadmap:
 
+  Sprint 0: Organization module + Event Bus + Prompt Registry + Observability (DONE)
+  Sprint 1: Conversation & Ownership (Chatwoot webhook, lead assignment)
+  Sprint 2: Lead & Qualification (LangGraph graph, pgvector scoring)
+  Sprint 3: Recommendation (property matching, vector similarity)
+  Sprint 4: Appointment (scheduling)
+  Sprint 5: Engagement (WhatsApp follow-up via wacrm)
 
-Sprint roadmap:
+  Agent roles:
 
-
-Sprint 0: Organization module + Event Bus + Prompt Registry + Observability (DONE)
-Sprint 1: Conversation & Ownership (Chatwoot webhook, lead assignment)
-Sprint 2: Lead & Qualification (LangGraph graph, pgvector scoring)
-Sprint 3: Recommendation (property matching, vector similarity)
-Sprint 4: Appointment (scheduling)
-Sprint 5: Engagement (WhatsApp follow-up via wacrm)
-
-
-Agent roles:
-
-
-Backend/DDD work → adopt ai-specs/agents/backend-developer.md
-LangGraph graphs → read Agentic_System.md + adopt ai-specs/agents/backend-developer.md
-Migrations → ONLY via uv run alembic revision --autogenerate
-
+  Backend/DDD work → adopt ai-specs/agents/backend-developer.md
+  LangGraph graphs → read Agentic_System.md + adopt ai-specs/agents/backend-developer.md
+  Migrations → ONLY via uv run alembic revision --autogenerate
 
 rules:
-_global:
-- Read docs/base-standards.md before every task
-- Read docs/FEATURE_INTAKE.md to classify risk before proposing
-- Propose via /opsx:propose before writing any code
-- NEVER write DDL outside alembic/versions/ — exit with error if attempted
-- NEVER import from one bounded context module into another
-- All cross-module events via Outbox (outbox_events table)
-- organization_id filter on every authenticated DB query
-backend:
-- Use SQLAlchemy async Session via get_db() — never raw asyncpg
-- Run uv run ruff check . before marking task done
-- LangGraph nodes must call AIDecisionTrace.log()
-- Fetch all LLM prompts from Prompt Registry — never hardcode
-agents:
-- LangGraph graphs in app/<module>/agents/<name>_graph.py
-- State TypedDict must include organization_id
-- Document graph edges in design.md before coding nodes
-testing:
-- DO NOT modify tests/conftest.py without a spec
-- Mock LangGraph with deterministic fixture responses
-- uv run pytest --cov=app --cov-fail-under=90
-EOF
-
-echo "✓ openspec/config.yml written"
+  _global:
+    - Read docs/base-standards.md before every task
+    - Read docs/FEATURE_INTAKE.md to classify risk before proposing
+    - Propose via /opsx:propose before writing any code
+    - NEVER write DDL outside alembic/versions/ — exit with error if attempted
+    - NEVER import from one bounded context module into another
+    - All cross-module events via Outbox (outbox_events table)
+    - organization_id filter on every authenticated DB query
+  backend:
+    - Use SQLAlchemy async Session via get_db() — never raw asyncpg
+    - Run uv run ruff check . before marking task done
+    - LangGraph nodes must call AIDecisionTrace.log()
+    - Fetch all LLM prompts from Prompt Registry — never hardcode
+  agents:
+    - LangGraph graphs in app/<module>/agents/<name>_graph.py
+    - State TypedDict must include organization_id
+    - Document graph edges in design.md before coding nodes
+  testing:
+    - DO NOT modify tests/conftest.py without a spec
+    - Mock LangGraph with deterministic fixture responses
+    - uv run pytest --cov=app --cov-fail-under=90
