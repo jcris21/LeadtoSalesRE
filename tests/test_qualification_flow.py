@@ -426,14 +426,16 @@ async def test_cross_tenant_extraction_is_rejected(session_factory, seeded_lead)
 # --- US-217: Nivel 1 / Nivel 2 extractor ordering -----------------------
 
 
-def test_deterministic_extractors_run_nivel_2_bedrooms_last():
-    """`_DETERMINISTIC_EXTRACTORS` (qualification_turn.py) must keep the only
-    Nivel-2-only extractor (`extract_bedrooms`) after every Nivel 1 extractor,
-    mirroring `PROFILE_DIMENSIONS`'s Nivel 1 -> Nivel 2 precedence."""
+def test_deterministic_extractors_run_nivel_2_bedrooms_and_motivation_last():
+    """`_DETERMINISTIC_EXTRACTORS` (qualification_turn.py) must keep the
+    Nivel-2-only extractors (`extract_bedrooms`, `extract_motivation` —
+    US-219) after every Nivel 1 extractor, mirroring `PROFILE_DIMENSIONS`'s
+    Nivel 1 -> Nivel 2 precedence."""
     from app.modules.lead_qualification.application.qualification_flow import (
         extract_bedrooms,
         extract_financing_and_decision_mode,
         extract_locations,
+        extract_motivation,
         extract_property_type,
         extract_timeline_and_must_haves,
     )
@@ -441,17 +443,19 @@ def test_deterministic_extractors_run_nivel_2_bedrooms_last():
         _DETERMINISTIC_EXTRACTORS,
     )
 
-    assert _DETERMINISTIC_EXTRACTORS[-1] is extract_bedrooms
     nivel_1_extractors = {
         extract_locations,
         extract_property_type,
         extract_timeline_and_must_haves,
         extract_financing_and_decision_mode,
     }
-    bedrooms_index = _DETERMINISTIC_EXTRACTORS.index(extract_bedrooms)
+    nivel_2_extractors = {extract_bedrooms, extract_motivation}
+    max_nivel_1_index = max(
+        _DETERMINISTIC_EXTRACTORS.index(extractor) for extractor in nivel_1_extractors
+    )
     assert all(
-        _DETERMINISTIC_EXTRACTORS.index(extractor) < bedrooms_index
-        for extractor in nivel_1_extractors
+        _DETERMINISTIC_EXTRACTORS.index(extractor) > max_nivel_1_index
+        for extractor in nivel_2_extractors
     )
 
 
