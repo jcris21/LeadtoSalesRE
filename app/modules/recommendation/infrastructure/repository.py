@@ -334,3 +334,20 @@ class RecommendationRepository:
             .order_by(RecommendationORM.generated_at, RecommendationORM.rank)
         )
         return list(result.scalars().all())
+
+    async def mark_selected(self, lead_id: uuid.UUID, property_id: uuid.UUID, generated_at) -> None:
+        """US-220: flags the lead's chosen property within its own batch
+        (`lead_id` + `generated_at` identify one recommendation search, same
+        key `mark_delivered` already uses) via the existing `feedback` JSON
+        column — reserved for exactly this kind of event, no schema change.
+        Only one row per batch carries the marker: every other row in the
+        batch is explicitly cleared so a stale selection can never survive a
+        re-selection."""
+        result = await self._session.execute(
+            select(RecommendationORM).where(
+                RecommendationORM.lead_id == lead_id,
+                RecommendationORM.generated_at == generated_at,
+            )
+        )
+        for row in result.scalars().all():
+            row.feedback = {"selected_by_lead": True} if row.property_id == property_id else None

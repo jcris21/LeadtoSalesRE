@@ -263,12 +263,26 @@ async def run_scheduling_turn(
     return SchedulingTurnResult(outcome="booked", response=confirmation, appointment=appointment)
 
 
+def is_lead_selected(row) -> bool:
+    """US-220: a `RecommendationORM` row is the lead's confirmed pick when
+    `deepening_turn.run_deepening_turn` flagged it via
+    `RecommendationRepository.mark_selected` — reuses the existing `feedback`
+    JSON column, no schema change."""
+    return bool(row.feedback) and row.feedback.get("selected_by_lead") is True
+
+
 def _latest_top_pick(recommendations: list) -> uuid.UUID | None:
-    """Rank-1 property of the most recent recommendation batch
-    (design.md Decision 2 — call-site policy, not new repository behavior)."""
+    """US-220: the lead's recorded selection within the latest batch wins,
+    falling back to the pipeline's original rank-1 (design.md Decision 2 —
+    call-site policy, not new repository behavior) when no selection was
+    recorded — unchanged behavior for every batch that never went through
+    the deepening turn."""
     if not recommendations:
         return None
     latest_generated_at = max(row.generated_at for row in recommendations)
     latest_batch = [row for row in recommendations if row.generated_at == latest_generated_at]
+    selected = next((row for row in latest_batch if is_lead_selected(row)), None)
+    if selected is not None:
+        return selected.property_id
     top = min(latest_batch, key=lambda row: row.rank)
     return top.property_id

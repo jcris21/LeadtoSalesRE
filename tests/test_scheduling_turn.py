@@ -317,3 +317,101 @@ def _patch_calendar_client(monkeypatch):
         "app.modules.conversation_ownership.application.scheduling_turn.build_wacrm_client",
         _fake_build_wacrm_client,
     )
+
+
+# --- US-220: lead-selected property takes priority over rank-1 --------------
+
+
+async def test_latest_top_pick_prefers_lead_selected_property_over_rank_one(
+    session_factory, seeded_org, seeded_lead, monkeypatch
+):
+    """US-220: once `RecommendationRepository.mark_selected` flags a non-rank-1
+    property in the batch, `run_scheduling_turn` SHALL book that property, not
+    the pipeline's original rank-1 default — the routing mechanism the
+    deepening turn relies on."""
+    from app.modules.appointment.infrastructure.repository import BrokerRepository
+    from app.modules.recommendation.infrastructure.repository import RecommendationRepository
+
+    rank1_property = await _seed_property_row(session_factory, seeded_org, external_id="prop-r1")
+    rank2_property = await _seed_property_row(session_factory, seeded_org, external_id="prop-r2")
+    generated_at = utcnow()
+    async with session_factory() as session:
+        session.add(
+            RecommendationORM(
+                id=new_id(),
+                organization_id=seeded_org,
+                lead_id=seeded_lead,
+                buyer_profile_id=None,
+                property_id=rank1_property,
+                rank=1,
+                score=0.9,
+                signals=[],
+                explanation="rank 1",
+                neighborhood=None,
+                feedback=None,
+                generated_at=generated_at,
+                delivered_at=None,
+            )
+        )
+        session.add(
+            RecommendationORM(
+                id=new_id(),
+                organization_id=seeded_org,
+                lead_id=seeded_lead,
+                buyer_profile_id=None,
+                property_id=rank2_property,
+                rank=2,
+                score=0.8,
+                signals=[],
+                explanation="rank 2",
+                neighborhood=None,
+                feedback=None,
+                generated_at=generated_at,
+                delivered_at=None,
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        await RecommendationRepository(session).mark_selected(
+            seeded_lead, rank2_property, generated_at
+        )
+        await session.commit()
+
+    broker = Broker(organization_id=seeded_org, active=True)
+    async with session_factory() as session:
+        await BrokerRepository(session).add(broker)
+        await session.commit()
+    await _seed_confirmed_check(session_factory, seeded_org, rank2_property)
+    _patch_calendar_client(monkeypatch)
+
+    async with session_factory() as session:
+        conversation = _make_conversation(seeded_org, seeded_lead)
+        result = await run_scheduling_turn(session, conversation=conversation, text=SLOT_TEXT)
+        await session.commit()
+
+    assert result.outcome == "booked"
+    assert result.appointment.property_id == rank2_property
+
+
+async def _seed_property_row(session_factory, org_id, *, external_id: str):
+    property_id = new_id()
+    async with session_factory() as session:
+        session.add(
+            PropertyORM(
+                id=property_id,
+                organization_id=org_id,
+                external_id=external_id,
+                price=250000.0,
+                zone="Miraflores",
+                property_type="apartment",
+                features=[],
+                description="",
+                name_address=f"Av. {external_id} 123",
+                estado="disponible",
+                link_references=[],
+                updated_at=utcnow(),
+            )
+        )
+        await session.commit()
+    return property_id

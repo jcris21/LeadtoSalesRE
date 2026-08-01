@@ -635,7 +635,7 @@ Scenario: Router clasifica intención y delega
 | US-217 [ADAPTADA de US-202..205] | Reordenar preguntas Nivel 1 / Nivel 2 | Discovery (QUALIFICATION) | Orden de extractores existentes | buyer_profiles | No [orquestación pendiente] |
 | US-218 [Implementado] | Diferir captura de identidad (DNI) | New→Discovery | Reordena Identity Gate en coordinator.py | leads | Sí [`_dni_gate` + `REPROMPT_DNI`] |
 | US-219 [NUEVA] | Motivación + preguntas adaptativas por tipo | Discovery (QUALIFICATION) | Nuevo extractor `extract_motivation` | buyer_profiles (columna nueva) | No [GAP] |
-| US-220 [NUEVA] | Turno de profundización pre-agenda | Recommendation→Scheduling | Prompt/orquestación tras el narrator | — | No [GAP], depende de US-212 |
+| US-220 [Implementado] | Turno de profundización pre-agenda | Recommendation→Scheduling | Orquestación determinística (`deepening_turn.py`) tras el narrator | — | Sí [`run_deepening_turn` + `RecommendationRepository.mark_selected` vía columna `feedback` existente] |
 | US-221 [ADAPTADA de US-212] | Invitación conversacional a visita | Recommendation→Scheduling | Prompt sobre wiring de US-212 | — | No [bloqueada por US-212] |
 
 ## Epic 4 — Backlog de Conversión (propuesta 2026-07-25, HUs nuevas/adaptadas)
@@ -980,12 +980,14 @@ Scenario: Lead recibió el Top-3 narrado
 
 **Alineación**
 - (a) Recommendation → Scheduling (RECOMMENDATION→SCHEDULING).
-- (b) Prompt/orquestación — nuevo turno conversacional en `DEFAULT_SYSTEM_PROMPT` /
-  `_conversational_turn`, posterior a la narración ya implementada
-  (`llm_narrator.GeminiRecommendationNarrator.narrate`).
-- (c) Ninguna tabla nueva.
-- (d) [GAP] No implementado; depende conceptualmente de US-212 para que el turno tenga a dónde llevar
-  (sin agendamiento conectado, la pregunta de profundización no tiene siguiente paso real).
+- (b) Orquestación determinística (no prompt-only) — nuevo turno `deepening_turn.run_deepening_turn`
+  invocado desde `_conversational_turn`, posterior a la narración ya implementada
+  (`llm_narrator.GeminiRecommendationNarrator.narrate`) y previo al turno de agendamiento (US-212).
+  Ver `openspec/changes/pre-agenda-deepening-us-220/proposal.md` (sección "Deviations") para el porqué
+  de esta desviación respecto al `(b)` original de este documento.
+- (c) Ninguna tabla nueva — reutiliza la columna `RecommendationORM.feedback` ya existente.
+- (d) [Implementado] US-212 ya está wireado (`scheduling-wiring-us-212`); la propiedad elegida en el
+  turno de profundización se enruta a `run_scheduling_turn` vía `_latest_top_pick`.
 
 #### US-221 [ADAPTADA — ver US-212] — Lenguaje natural de invitación a visita
 

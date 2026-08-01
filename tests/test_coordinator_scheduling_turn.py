@@ -233,3 +233,139 @@ async def test_coordinator_message_without_slot_falls_through_to_responder(
     async with session_factory() as session:
         conversation = await ConversationRepository(session).get(conversation_id)
         assert conversation.state is ConversationState.RECOMMENDATION
+
+
+# --- US-220: deepening turn end-to-end through the coordinator --------------
+
+
+async def _seed_multi_item_recommendation_conversation(session_factory):
+    """Same shape as `_seed_recommendation_conversation` but with a 3-item
+    Top-3 batch, the precondition US-220's deepening turn requires (a
+    single-property batch has nothing to deepen on, see
+    tests/test_deepening_turn.py)."""
+    org_id = new_id()
+    property_ids = [new_id(), new_id(), new_id()]
+    generated_at = utcnow()
+    async with session_factory() as session:
+        session.add(OrganizationORM(id=org_id, name="Org", status="active", created_at=utcnow()))
+        for i, property_id in enumerate(property_ids, start=1):
+            session.add(
+                PropertyORM(
+                    id=property_id,
+                    organization_id=org_id,
+                    external_id=f"prop-220-{i}",
+                    price=250000.0,
+                    zone="Miraflores",
+                    property_type="apartment",
+                    features=[],
+                    description="",
+                    name_address=f"Av. Test {i}",
+                    estado="disponible",
+                    link_references=[],
+                    updated_at=utcnow(),
+                )
+            )
+        lead = Lead(
+            organization_id=org_id, crm_lead_id="lead-220-coord", contact_reference="+51999888777"
+        )
+        await LeadRepository(session).add(lead)
+        for rank, property_id in enumerate(property_ids, start=1):
+            session.add(
+                RecommendationORM(
+                    id=new_id(),
+                    organization_id=org_id,
+                    lead_id=lead.id,
+                    buyer_profile_id=None,
+                    property_id=property_id,
+                    rank=rank,
+                    score=1.0 - (rank * 0.1),
+                    signals=[],
+                    explanation=f"matches criteria (rank {rank})",
+                    neighborhood=None,
+                    feedback=None,
+                    generated_at=generated_at,
+                    delivered_at=None,
+                )
+            )
+        broker = Broker(organization_id=org_id, active=True)
+        await BrokerRepository(session).add(broker)
+
+        conversation = Conversation(organization_id=org_id, chatwoot_conversation_id="220")
+        conversation.link_lead(lead.id)
+        conversation.transition_to(ConversationState.AI_OWNED, reason="test setup")
+        conversation.transition_to(ConversationState.QUALIFICATION, reason="test setup")
+        conversation.transition_to(ConversationState.RECOMMENDATION, reason="test setup")
+        await ConversationRepository(session).add(conversation)
+        await session.commit()
+        return org_id, conversation.id, lead.id, property_ids
+
+
+async def test_coordinator_asks_deepening_question_before_scheduling_on_multi_item_batch(
+    session_factory, monkeypatch
+):
+    _patch_scheduling_seams(monkeypatch)
+    org_id, conversation_id, _lead_id, _property_ids = (
+        await _seed_multi_item_recommendation_conversation(session_factory)
+    )
+
+    responder = await _handle(
+        session_factory, org_id, conversation_id, "me gustaron todas, no sé cuál elegir"
+    )
+    assert responder.calls == 0  # deepening question short-circuits the LLM
+
+    async with session_factory() as session:
+        outbox = (await session.execute(select(OutboxEventORM))).scalars().all()
+        response_events = [row for row in outbox if row.event_type == "ResponseReady"]
+        assert len(response_events) == 1
+        assert "opci" in response_events[0].payload["fields"]["response"].lower()
+
+        conversation = await ConversationRepository(session).get(conversation_id)
+        assert conversation.state is ConversationState.RECOMMENDATION
+
+
+async def test_coordinator_selection_then_slot_books_the_selected_non_rank1_property(
+    session_factory, monkeypatch
+):
+    """End-to-end US-212 <-> US-220 handoff: the lead names option 2 in one
+    turn, then confirms a slot in a later turn — the booked appointment SHALL
+    target the rank-2 property, not the pipeline's rank-1 default."""
+    _patch_scheduling_seams(monkeypatch)
+    org_id, conversation_id, lead_id, property_ids = (
+        await _seed_multi_item_recommendation_conversation(session_factory)
+    )
+    rank2_property = property_ids[1]
+
+    async with session_factory() as session:
+        await AvailabilityCheckRepository(session).save(
+            AvailabilityCheck(
+                organization_id=org_id,
+                property_id=rank2_property,
+                slot=SLOT,
+                status=AvailabilityStatus.CONFIRMED,
+                source=AvailabilityCheckSource.INITIAL,
+            )
+        )
+        await session.commit()
+
+    first_responder = await _handle(session_factory, org_id, conversation_id, "la opción 2 se ve bien")
+    assert first_responder.calls == 1  # selection recorded, turn falls through normally
+
+    second_responder = await _handle(session_factory, org_id, conversation_id, SLOT_TEXT)
+    assert second_responder.calls == 0  # scheduling short-circuits, as usual
+
+    async with session_factory() as session:
+        conversation = await ConversationRepository(session).get(conversation_id)
+        assert conversation.state is ConversationState.APPOINTMENT
+
+        outbox = (await session.execute(select(OutboxEventORM))).scalars().all()
+        response_events = [row for row in outbox if row.event_type == "ResponseReady"]
+        assert "meet.google.com" in response_events[-1].payload["fields"]["response"]
+
+        rows = (
+            await session.execute(
+                RecommendationORM.__table__.select().where(
+                    RecommendationORM.lead_id == lead_id, RecommendationORM.property_id == rank2_property
+                )
+            )
+        ).first()
+        assert rows.feedback == {"selected_by_lead": True}
