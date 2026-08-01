@@ -266,3 +266,12 @@ def test_get_enrichment_adapter_wires_configured_api_key_and_location_lookup(mon
         assert isinstance(adapter._location_lookup, SqlPropertyLocationLookup)
     finally:
         recommendation_wiring._enrichment_adapter = None
+
+
+def test_closing_question_frames_a_visit_as_the_next_step():
+    """US-221: the deterministic fallback closing question (used only when the LLM
+    narrator is unavailable/keyless) must frame a visit as the natural next step, not
+    just ask which option the lead prefers, and never as a rigid yes/no."""
+    lowered = recommendation_wiring._CLOSING_QUESTION.lower()
+    assert "visita" in lowered
+    assert "sí/no" not in lowered and "si/no" not in lowered

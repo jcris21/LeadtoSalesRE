@@ -636,7 +636,7 @@ Scenario: Router clasifica intención y delega
 | US-218 [Implementado] | Diferir captura de identidad (DNI) | New→Discovery | Reordena Identity Gate en coordinator.py | leads | Sí [`_dni_gate` + `REPROMPT_DNI`] |
 | US-219 [NUEVA] | Motivación + preguntas adaptativas por tipo | Discovery (QUALIFICATION) | Nuevo extractor `extract_motivation` | buyer_profiles (columna nueva) | No [GAP] |
 | US-220 [Implementado] | Turno de profundización pre-agenda | Recommendation→Scheduling | Orquestación determinística (`deepening_turn.py`) tras el narrator | — | Sí [`run_deepening_turn` + `RecommendationRepository.mark_selected` vía columna `feedback` existente] |
-| US-221 [ADAPTADA de US-212] | Invitación conversacional a visita | Recommendation→Scheduling | Prompt sobre wiring de US-212 | — | No [bloqueada por US-212] |
+| US-221 [ADAPTADA de US-212] | Invitación conversacional a visita | Recommendation→Scheduling | Prompt sobre wiring de US-212 | — | Sí [prompt reescrito] |
 
 ## Epic 4 — Backlog de Conversión (propuesta 2026-07-25, HUs nuevas/adaptadas)
 

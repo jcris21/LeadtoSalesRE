@@ -87,9 +87,12 @@ def _get_enrichment_adapter() -> NeighborhoodEnrichmentAdapter:
     return _enrichment_adapter
 
 
-#: Deterministic closing when the LLM narrator is unavailable — the Top-3
-#: message always ends asking which option the lead prefers.
-_CLOSING_QUESTION = "¿Cuál de estas opciones te gustaría conocer primero?"
+#: Deterministic closing when the LLM narrator is unavailable (US-221: frames
+#: a visit as the natural next step, never a rigid yes/no question) — the
+#: Top-3 message always ends inviting the lead toward coordinating a visit.
+_CLOSING_QUESTION = (
+    "Cuéntame cuál de estas opciones te interesa más y coordinamos una visita."
+)
 
 
 def _format_recommendation_message(
