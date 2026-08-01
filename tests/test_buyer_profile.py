@@ -72,6 +72,10 @@ async def test_progressive_profiling_one_dimension_at_a_time(session_factory, se
 async def test_profile_completed_fires_exactly_on_crossing_threshold(
     session_factory, seeded_lead
 ):
+    """US-215 (recalibrated for US-219's 9-dimension model): `ProfileCompleted`
+    must fire exactly once, right when the six Nivel 1 dimensions are
+    captured (6/9 ~= 66.67%, above the 65.0 platform-default threshold), not
+    on the later Nivel 2 refinement updates."""
     async with session_factory() as session:
         service = BuyerProfileCaptureService(session)
         await service.update_profile(seeded_lead, ProfilePatch(budget=MoneyRange(50, 80)))
@@ -83,9 +87,10 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
         await service.update_profile(
             seeded_lead, ProfilePatch(financing_type=FinancingType.CASH)
         )
-        await service.update_profile(
+        completeness_at_nivel_1_complete = await service.update_profile(
             seeded_lead, ProfilePatch(decision_maker_mode=DecisionMakerMode.SOLO)
         )
+        # Nivel 2 refinement — must NOT re-publish ProfileCompleted.
         await service.update_profile(seeded_lead, ProfilePatch(bedrooms=2))
         await service.update_profile(
             seeded_lead, ProfilePatch(motivation=Motivation.FIRST_HOME)
@@ -93,10 +98,10 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
         completeness = await service.update_profile(
             seeded_lead, ProfilePatch(must_haves=("cochera",))
         )
-        # A further refinement must NOT re-publish ProfileCompleted.
         await service.update_profile(seeded_lead, ProfilePatch(locations=("Surco", "Barranco")))
         await session.commit()
 
+    assert completeness_at_nivel_1_complete == pytest.approx(600.0 / 9)
     assert completeness == 100.0
     async with session_factory() as session:
         events = (
@@ -109,7 +114,44 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
             .all()
         )
         assert len(events) == 1
-        assert events[0].payload["fields"]["completeness"] == 100.0
+        assert events[0].payload["fields"]["completeness"] == pytest.approx(600.0 / 9)
+
+
+def test_gate_default_threshold_allows_advance_with_all_nivel_1_dimensions():
+    """US-215 recalibration: with the platform-default threshold, the gate
+    opens once all six Nivel 1 dimensions are captured, even with zero
+    Nivel 2 (must_haves/bedrooms/motivation) dimensions."""
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        budget=MoneyRange(50, 80),
+        locations=("Surco",),
+        property_type=PropertyType.HOUSE,
+        timeline=Timeline.IMMEDIATE,
+        financing_type=FinancingType.CASH,
+        decision_maker_mode=DecisionMakerMode.SOLO,
+    )
+    result = CompletenessGate().can_advance_to_recommendation(profile)
+    assert result.can_advance is True
+    assert result.completeness == pytest.approx(600.0 / 9)
+    assert result.missing_dimension is None
+
+
+def test_gate_default_threshold_blocks_with_one_nivel_1_dimension_missing():
+    """The default threshold must not open one Nivel 1 dimension early:
+    5 of 6 Nivel 1 dimensions (5/9 ~= 55.56%) stays below the 65.0 default."""
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        budget=MoneyRange(50, 80),
+        locations=("Surco",),
+        property_type=PropertyType.HOUSE,
+        timeline=Timeline.IMMEDIATE,
+        financing_type=FinancingType.CASH,
+        # decision_maker_mode intentionally left uncaptured.
+    )
+    result = CompletenessGate().can_advance_to_recommendation(profile)
+    assert result.can_advance is False
+    assert result.completeness == pytest.approx(500.0 / 9)
+    assert result.missing_dimension == "decision_maker_mode"
 
 
 def test_gate_blocks_incomplete_profile_with_directed_missing_dimension():

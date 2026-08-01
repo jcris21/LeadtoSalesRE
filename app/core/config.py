@@ -39,11 +39,15 @@ class Settings(BaseSettings):
     wacrm_base_url: str = "http://localhost:8080"
     crm_sync_poll_interval_seconds: float = 30.0
     crm_staleness_threshold_seconds: int = 60  # QA-13 staleness bound
-    # QA-14 gate, percent. 80.0 = 4 of the 5 BuyerProfile dimensions
-    # (budget, locations, property_type, timeline) captured — US-215
-    # recalibration for a recommendation-first flow; `must_haves` becomes a
-    # post-Matching refinement dimension (Nivel 2, US-217).
-    profile_completeness_threshold: float = 80.0
+    # QA-14 gate, percent. 65.0 = the six Nivel 1 BuyerProfile dimensions
+    # (budget, locations, property_type, timeline, financing_type,
+    # decision_maker_mode) captured out of the current 9-dimension model —
+    # 6/9 ~= 66.67% opens the gate, 5/9 ~= 55.56% (one Nivel 1 dimension
+    # missing) does not. US-215 recalibration for a recommendation-first
+    # flow, re-tuned by the 9-dim-recalibration follow-up after US-219 added
+    # `motivation` as a 9th dimension; `must_haves`/`bedrooms`/`motivation`
+    # are post-Matching refinement dimensions (Nivel 2, US-217/US-219).
+    profile_completeness_threshold: float = 65.0
 
     # Event bus / outbox worker. G12 (docs/e2e-manual-chat-checklist.md): a
     # handler that fails on every delivery must not be retried every poll
