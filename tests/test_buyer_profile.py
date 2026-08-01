@@ -109,7 +109,15 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
             .all()
         )
         assert len(events) == 1
-        assert events[0].payload["fields"]["completeness"] == 100.0
+        # ProfileCompleted fires exactly once, at the moment the profile
+        # CROSSES `profile_completeness_threshold` (80.0 by default, US-215) —
+        # not when it later reaches 100%. With US-219's 9th dimension
+        # (`motivation`), the 8th captured dimension (motivation itself, per
+        # `PROFILE_DIMENSIONS` order) already crosses 80%: 8/9 ~= 88.89%. The
+        # 9th dimension (`must_haves`) then completes the profile to 100%
+        # without re-publishing the event (asserted above via `len(events) == 1`
+        # and the final `completeness == 100.0` return value).
+        assert events[0].payload["fields"]["completeness"] == pytest.approx(800.0 / 9)
 
 
 def test_gate_blocks_incomplete_profile_with_directed_missing_dimension():

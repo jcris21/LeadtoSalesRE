@@ -426,14 +426,17 @@ async def test_cross_tenant_extraction_is_rejected(session_factory, seeded_lead)
 # --- US-217: Nivel 1 / Nivel 2 extractor ordering -----------------------
 
 
-def test_deterministic_extractors_run_nivel_2_bedrooms_last():
-    """`_DETERMINISTIC_EXTRACTORS` (qualification_turn.py) must keep the only
-    Nivel-2-only extractor (`extract_bedrooms`) after every Nivel 1 extractor,
-    mirroring `PROFILE_DIMENSIONS`'s Nivel 1 -> Nivel 2 precedence."""
+def test_deterministic_extractors_run_nivel_2_last():
+    """`_DETERMINISTIC_EXTRACTORS` (qualification_turn.py) must keep the
+    Nivel-2-only extractors (`extract_bedrooms`, `extract_motivation` — US-219)
+    after every Nivel 1 extractor, mirroring `PROFILE_DIMENSIONS`'s Nivel 1 ->
+    Nivel 2 precedence. `extract_motivation` is last: US-219 appends
+    `motivation` after `bedrooms` in `PROFILE_DIMENSIONS`."""
     from app.modules.lead_qualification.application.qualification_flow import (
         extract_bedrooms,
         extract_financing_and_decision_mode,
         extract_locations,
+        extract_motivation,
         extract_property_type,
         extract_timeline_and_must_haves,
     )
@@ -441,17 +444,21 @@ def test_deterministic_extractors_run_nivel_2_bedrooms_last():
         _DETERMINISTIC_EXTRACTORS,
     )
 
-    assert _DETERMINISTIC_EXTRACTORS[-1] is extract_bedrooms
+    assert _DETERMINISTIC_EXTRACTORS[-1] is extract_motivation
     nivel_1_extractors = {
         extract_locations,
         extract_property_type,
         extract_timeline_and_must_haves,
         extract_financing_and_decision_mode,
     }
-    bedrooms_index = _DETERMINISTIC_EXTRACTORS.index(extract_bedrooms)
-    assert all(
-        _DETERMINISTIC_EXTRACTORS.index(extractor) < bedrooms_index
-        for extractor in nivel_1_extractors
+    nivel_2_extractors = {extract_bedrooms, extract_motivation}
+    for nivel_1 in nivel_1_extractors:
+        for nivel_2 in nivel_2_extractors:
+            assert _DETERMINISTIC_EXTRACTORS.index(nivel_1) < _DETERMINISTIC_EXTRACTORS.index(
+                nivel_2
+            )
+    assert _DETERMINISTIC_EXTRACTORS.index(extract_bedrooms) < _DETERMINISTIC_EXTRACTORS.index(
+        extract_motivation
     )
 
 
