@@ -24,6 +24,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.modules.conversation_ownership.application.deepening_turn import run_deepening_turn
 from app.modules.conversation_ownership.application.guardrail import GuardrailInterceptor
 from app.modules.conversation_ownership.application.intent_router import (
     IntentCategory,
@@ -397,6 +398,23 @@ class CoordinatorAgent:
                 reason="Ownership assigned to AI; beginning conversational qualification",
             )
 
+        deepening = await self._deepening_turn(conversation, text, recorder)
+        if deepening is not None and deepening.outcome == "asked":
+            # US-220: confirms which Top-3 option interested the lead before
+            # a scheduling slot is trusted to resolve a specific property —
+            # deterministic text, never LLM output, same short-circuit
+            # posture as `_scheduling_turn`'s own non-`no_slot` outcomes.
+            response = deepening.response or ""
+            conversation.record_event(
+                ResponseReady(
+                    organization_id=conversation.organization_id,
+                    conversation_id=str(conversation.id),
+                    chatwoot_conversation_id=conversation.chatwoot_conversation_id,
+                    response=response,
+                )
+            )
+            return response
+
         scheduling = await self._scheduling_turn(conversation, text, recorder)
         if scheduling is not None and scheduling.outcome != "no_slot":
             # `guard_reply` polices LLM output for hallucinated property
@@ -464,6 +482,21 @@ class CoordinatorAgent:
             )
         )
         return response
+
+    async def _deepening_turn(self, conversation: Conversation, text: str, recorder):
+        """US-220: only meaningful in `RECOMMENDATION` — aditive-only, same
+        gating posture as `_scheduling_turn`/`_build_grounding_note`. Runs
+        BEFORE `_scheduling_turn` so a lead's option selection ("opción 2")
+        is captured before any slot in the same/later message is resolved
+        against the wrong (rank-1) property."""
+        if conversation.state is not ConversationState.RECOMMENDATION:
+            return None
+        result = await run_deepening_turn(self._session, conversation=conversation, text=text)
+        if result.outcome == "not_applicable":
+            return None
+        if recorder is not None:
+            recorder.record_tool_call("deepening.run_turn", {"text": text}, result.outcome)
+        return result
 
     async def _scheduling_turn(self, conversation: Conversation, text: str, recorder):
         """US-212: only meaningful in `RECOMMENDATION` — aditive-only, same

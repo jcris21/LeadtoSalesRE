@@ -181,6 +181,43 @@ def test_gate_allows_complete_profile():
     assert result.missing_dimension is None
 
 
+def test_gate_opens_at_default_threshold_once_nivel_1_captured():
+    """US-215 Gherkin (recalibrated for the final 9-dimension model): the
+    platform-default threshold (65.0, set in `app/core/config.py`) must open
+    the gate once all six Nivel 1 dimensions are captured, with the Nivel 2
+    refinement fields (`must_haves`, `bedrooms`, `motivation`) still empty."""
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        budget=MoneyRange(50, 80),
+        locations=("Surco",),
+        property_type=PropertyType.HOUSE,
+        timeline=Timeline.THREE_MONTHS,
+        financing_type=FinancingType.CASH,
+        decision_maker_mode=DecisionMakerMode.SOLO,
+    )
+    assert profile.completeness() == pytest.approx(600.0 / 9.0)
+    result = CompletenessGate().can_advance_to_recommendation(profile)
+    assert result.can_advance is True
+    assert result.missing_dimension is None
+
+
+def test_gate_stays_closed_at_default_threshold_missing_one_nivel_1_dimension():
+    """Five of six Nivel 1 dimensions (missing `decision_maker_mode`) must NOT
+    reach the recalibrated default threshold."""
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        budget=MoneyRange(50, 80),
+        locations=("Surco",),
+        property_type=PropertyType.HOUSE,
+        timeline=Timeline.THREE_MONTHS,
+        financing_type=FinancingType.CASH,
+    )
+    assert profile.completeness() == pytest.approx(500.0 / 9.0)
+    result = CompletenessGate().can_advance_to_recommendation(profile)
+    assert result.can_advance is False
+    assert result.missing_dimension == "decision_maker_mode"
+
+
 # --- US-208: financing_type / decision_maker_mode dimensions -----------
 
 
