@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from app.modules.recommendation.infrastructure.llm_narrator import (
+    _SYSTEM_PROMPT,
     GeminiRecommendationNarrator,
 )
 
@@ -49,3 +50,15 @@ async def test_narrate_returns_none_on_terminal_http_error():
     text = await narrator.narrate(profile={"name": "Ana"}, entries=[{"zone": "Miraflores"}])
 
     assert text is None
+
+
+def test_system_prompt_closes_with_a_visit_tied_invitation_not_a_bare_preference_question():
+    """US-221: the Top-3 paragraph's close must frame a visit as the natural next step
+    tied to the recommended option, not just ask which option the lead prefers — while
+    still never letting the LLM invent a date/time/availability (that stays
+    `run_scheduling_turn`'s job downstream)."""
+    lowered = _SYSTEM_PROMPT.lower()
+    assert "visita" in lowered
+    assert "coordinar" in lowered
+    assert "no inventes datos" in lowered
+    assert "cuál de las opciones prefiere o le gustaría visitar" not in lowered
