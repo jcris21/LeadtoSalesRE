@@ -35,22 +35,26 @@ class InventorySource(Protocol):
 
 
 class EmbeddingModel(Protocol):
-    """Turns a property's content into its embedding vector."""
+    """Turns a property's content into its embedding vector. Async (US-308):
+    a real model is an HTTP call; the deterministic hash implementation is
+    trivially async-compatible."""
 
     model_version: str
 
-    def embed(self, property: Property) -> tuple[float, ...]: ...
+    async def embed(self, property: Property) -> tuple[float, ...]: ...
 
 
 class HashEmbeddingModel:
     """Deterministic default: hashes the property's content into a
     fixed-length float vector. Keeps the pipeline demonstrably correct and
-    testable without any real embedding model or network call."""
+    testable without any real embedding model or network call. Superseded in
+    production by `OpenAIEmbeddingModel` when `openai_api_key` is configured
+    (see `infrastructure/embedding_model.build_embedding_model`, US-308)."""
 
     model_version = "hash-v1"
     vector_size = 16
 
-    def embed(self, property: Property) -> tuple[float, ...]:
+    async def embed(self, property: Property) -> tuple[float, ...]:
         digest = hashlib.sha256(_content_key(property).encode()).digest()
         return tuple(digest[i % len(digest)] / 255.0 for i in range(self.vector_size))
 
@@ -104,7 +108,7 @@ class PropertyIngestionService:
 
             embedding = PropertyEmbedding(
                 property_id=property.id,
-                vector=self._embedder.embed(property),
+                vector=await self._embedder.embed(property),
                 model_version=self._embedder.model_version,
                 computed_at=utcnow(),
             )

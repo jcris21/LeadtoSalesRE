@@ -39,6 +39,9 @@ _SIGNAL_PHRASES: dict[str, str] = {
     "must_have_coverage": "cumplir con tus requisitos indispensables",
     "semantic_similarity": "coincidir con lo que describiste",
     "property_type_match": "ser del tipo de propiedad que buscás",
+    # The Ranking Engine emits this name (ranking_engine.py) — without the
+    # entry the raw "type match" leaked into the lead-facing message.
+    "type_match": "ser del tipo de propiedad que buscás",
 }
 
 

@@ -7,12 +7,17 @@ the queryable record the AI Sidebar and later E13 dashboards read from.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from langsmith.run_helpers import get_current_run_tree
+from langsmith.run_helpers import trace as langsmith_trace
+from langsmith.run_trees import get_cached_client
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -23,6 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.modules.intelligence_ai_admin.infrastructure.db_models import AIDecisionTraceORM
 from app.shared.domain.base import new_id, utcnow
+from app.shared.infrastructure.pii_redaction import redact_pii_deep
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 _tracer = trace.get_tracer(__name__)
 
@@ -40,6 +49,39 @@ def setup_observability(app: FastAPI) -> None:
     FastAPIInstrumentor.instrument_app(app)
 
 
+def configure_langsmith_tracing(settings: "Settings | None" = None) -> None:
+    """Activates LangSmith tracing for every `@traceable`-decorated function
+    in the process (conversation brain, generative extractor, recommendation
+    narrator, LangGraph responder — Tasks 4/5/6/7) by setting the environment
+    variables the `langsmith` SDK reads at call time. A no-op when tracing is
+    disabled (the default), so an unconfigured deployment sees zero new
+    outbound calls, matching the `gemini_api_key`-unset degrade pattern.
+
+    When `langsmith_redact_pii` is also enabled, this seeds LangSmith's
+    process-wide client singleton (`get_cached_client`) with `redact_pii_deep`
+    as `hide_inputs`/`hide_outputs` — a global fallback that also covers runs
+    the per-call-site `@traceable` redaction hooks (Tasks 4/5/6/7) do NOT see,
+    most importantly LangGraph's own auto-generated runs for `ainvoke` and the
+    `respond` node, which otherwise carry the full unredacted conversational
+    state. Per-site hooks still take precedence where both apply (LangSmith
+    resolves function-level processors before client-level ones), so this is
+    additive, not a replacement. Must run before any traced call in the
+    process: the singleton is seeded once on first use and ignores kwargs on
+    subsequent calls, so calling this at boot (as `app/main.py` does) is what
+    makes the seeding actually take effect."""
+    settings = settings or get_settings()
+    if not settings.langsmith_tracing_enabled:
+        return
+    os.environ["LANGSMITH_TRACING"] = "true"
+    if settings.langsmith_api_key:
+        os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
+    os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
+    if settings.langsmith_endpoint:
+        os.environ["LANGSMITH_ENDPOINT"] = settings.langsmith_endpoint
+    if settings.langsmith_redact_pii:
+        get_cached_client(hide_inputs=redact_pii_deep, hide_outputs=redact_pii_deep)
+
+
 @asynccontextmanager
 async def trace_decision(
     session: AsyncSession,
@@ -49,33 +91,58 @@ async def trace_decision(
     prompt_version_id: uuid.UUID | None = None,
     conversation_id: uuid.UUID | None = None,
 ) -> AsyncIterator[DecisionTraceRecorder]:
-    """Wraps one AI decision in an OTel span and persists an AIDecisionTrace row
-    on exit, regardless of success (partial traces beat missing traces)."""
+    """Wraps one AI decision in an OTel span and a root LangSmith trace, and
+    persists an AIDecisionTrace row on exit, regardless of success (partial
+    traces beat missing traces).
+
+    The `langsmith_trace(...)` context manager establishes the root run for
+    this decision so that any `@traceable`-decorated call made inside the
+    block (the LangGraph responder, generative extractor, recommendation
+    narrator, conversation brain — Tasks 4-7) nests under it via LangSmith's
+    contextvar propagation, and — critically — so `get_current_run_tree()`
+    still resolves to this root run inside `finally`, after those nested
+    calls have returned and torn down their own child run context. Reading
+    `recorder.langsmith_run_url` any later (e.g. after this block exits)
+    would see `None`, since the root run's own context is gone by then. When
+    LangSmith tracing is disabled (the default), `langsmith_trace` is a
+    zero-cost no-op: no run is pushed onto any contextvar and no outbound
+    calls are made, so `recorder.langsmith_run_url` stays `None` throughout."""
     start = time.monotonic()
     recorder = DecisionTraceRecorder()
     with _tracer.start_as_current_span(f"ai_decision.{agent_name}") as span:
-        try:
-            yield recorder
-        finally:
-            latency_ms = int((time.monotonic() - start) * 1000)
-            span.set_attribute("organization_id", str(organization_id))
-            span.set_attribute("agent_name", agent_name)
-            span.set_attribute("latency_ms", latency_ms)
-            session.add(
-                AIDecisionTraceORM(
-                    id=new_id(),
-                    organization_id=organization_id,
-                    agent_name=agent_name,
-                    prompt_version_id=prompt_version_id,
-                    conversation_id=conversation_id,
-                    tool_calls=recorder.tool_calls,
-                    context_refs=recorder.context_refs,
-                    cost_usd=recorder.cost_usd,
-                    latency_ms=latency_ms,
-                    output=recorder.output,
-                    created_at=utcnow(),
+        async with langsmith_trace(
+            f"ai_decision.{agent_name}",
+            run_type="chain",
+            inputs={
+                "agent_name": agent_name,
+                "organization_id": str(organization_id),
+                "conversation_id": str(conversation_id) if conversation_id else None,
+            },
+        ) as run:
+            try:
+                yield recorder
+            finally:
+                latency_ms = int((time.monotonic() - start) * 1000)
+                run.end(outputs=recorder.output)
+                span.set_attribute("organization_id", str(organization_id))
+                span.set_attribute("agent_name", agent_name)
+                span.set_attribute("latency_ms", latency_ms)
+                session.add(
+                    AIDecisionTraceORM(
+                        id=new_id(),
+                        organization_id=organization_id,
+                        agent_name=agent_name,
+                        prompt_version_id=prompt_version_id,
+                        conversation_id=conversation_id,
+                        tool_calls=recorder.tool_calls,
+                        context_refs=recorder.context_refs,
+                        cost_usd=recorder.cost_usd,
+                        latency_ms=latency_ms,
+                        output=recorder.output,
+                        langsmith_run_url=recorder.langsmith_run_url,
+                        created_at=utcnow(),
+                    )
                 )
-            )
 
 
 class DecisionTraceRecorder:
@@ -86,6 +153,17 @@ class DecisionTraceRecorder:
         self.context_refs: list[str] = []
         self.cost_usd: float | None = None
         self.output: dict = {}
+
+    @property
+    def langsmith_run_url(self) -> str | None:
+        """Permalink to the active LangSmith run, if `configure_langsmith_tracing()`
+        enabled tracing and this call happens inside a traced span (Tasks 4/5/6/7).
+        `None` when tracing is disabled or no span is active — callers must treat
+        it as optional, same as `cost_usd`."""
+        run_tree = get_current_run_tree()
+        if run_tree is None:
+            return None
+        return f"https://smith.langchain.com/o/-/projects/p/-/r/{run_tree.id}"
 
     def record_tool_call(self, name: str, arguments: dict, result: object) -> None:
         self.tool_calls.append({"name": name, "arguments": arguments, "result": str(result)})

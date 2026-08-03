@@ -44,6 +44,7 @@ ALLOWED_ACTORS: frozenset[str] = frozenset(
         "coordinator",
         "staleness_guard",
         "profile_capture",
+        "scheduling_service",
     }
 )
 
@@ -121,6 +122,29 @@ class LeadSyncAdapter:
         if events:
             await event_bus.publish(self._session, events)
         return len(snapshots)
+
+    async def create_lead(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        contact_reference: str,
+        contact_name: str,
+        dni: str | None = None,
+        actor: str,
+    ) -> Lead:
+        """G8 write direction: a lead born in the chat is created in wacrm
+        (SoR) and mirrored locally in the same call — the immediate upsert
+        kills the up-to-30s CDC latency, and the next poll converges on the
+        same row (idempotent by crm_lead_id), so no extra state is needed."""
+        await self._authorize(organization_id, actor=actor, action="create", crm_lead_id=None)
+        snapshot = await self._client.create_lead(
+            contact_reference=contact_reference, contact_name=contact_name, dni=dni
+        )
+        lead = await self._upsert_from_snapshot(organization_id, snapshot)
+        events = lead.pull_domain_events()
+        if events:
+            await event_bus.publish(self._session, events)
+        return lead
 
     async def get_lead(
         self, organization_id: uuid.UUID, crm_lead_id: str, *, actor: str

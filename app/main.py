@@ -9,17 +9,41 @@ and Engagement modules are added in their respective sprints.
 
 import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager
 
+import truststore
 from fastapi import FastAPI
+
+# Verify outbound TLS (OpenAI, Chatwoot, Maps) against the OS certificate
+# store: corporate/AV TLS interception installs its root CA there but not in
+# certifi's bundle, which makes every httpx call fail with
+# CERTIFICATE_VERIFY_FAILED.
+truststore.inject_into_ssl()
+
+# G13: psycopg's async mode (langgraph-checkpoint-postgres) raises
+# `InterfaceError` under Python's default Windows event loop (ProactorEventLoop)
+# — verified directly against the configured Supabase host. asyncpg has no
+# such restriction, so this was never needed before psycopg was added. No
+# subprocess usage exists in this codebase, so SelectorEventLoop is a safe
+# policy switch; Linux/macOS deploys are unaffected (they never use Proactor).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from app.core.config import get_settings
 from app.core.organization_context import OrganizationContextMiddleware
+from app.modules.appointment.infrastructure import (
+    db_models as appointment_db_models,  # noqa: F401  (registers ORM on Base.metadata; no event wiring yet — US-402)
+)
 from app.modules.auth.router import router as auth_router
+from app.modules.conversation_memory.infrastructure import (
+    db_models as conversation_memory_db_models,  # noqa: F401  (registers ORM on Base.metadata; no API router yet — AI-102)
+)
 from app.modules.conversation_ownership.api.webhook_router import router as webhooks_router
 from app.modules.conversation_ownership.application.decay import decay_inactive_conversations
 from app.modules.conversation_ownership.wiring import register_event_handlers
 from app.modules.intelligence_ai_admin.api.router import router as prompts_router
+from app.modules.lead_qualification.api.router import router as lead_qualification_router
 from app.modules.lead_qualification.wiring import (
     crm_sync_loop,
 )
@@ -31,7 +55,7 @@ from app.modules.recommendation.wiring import (
     register_event_handlers as register_recommendation_handlers,
 )
 from app.shared.infrastructure.event_bus import event_bus
-from app.shared.infrastructure.observability import setup_observability
+from app.shared.infrastructure.observability import configure_langsmith_tracing, setup_observability
 
 logging.basicConfig(level=get_settings().log_level)
 
@@ -55,6 +79,12 @@ async def _dormancy_decay_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.modules.conversation_ownership.application.langgraph_responder import (
+        init_persistent_responder,
+        shutdown_persistent_responder,
+    )
+
+    await init_persistent_responder()
     worker_task = asyncio.create_task(event_bus.run_forever())
     decay_task = asyncio.create_task(_dormancy_decay_loop())
     crm_sync_task = asyncio.create_task(crm_sync_loop())
@@ -69,16 +99,19 @@ async def lifespan(app: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+        await shutdown_persistent_responder()
 
 
 app = FastAPI(title="Lead to Sales System", version="0.1.0", lifespan=lifespan)
 app.add_middleware(OrganizationContextMiddleware)
 setup_observability(app)
+configure_langsmith_tracing()
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(organizations_router, prefix="/api/v1")
 app.include_router(prompts_router, prefix="/api/v1")
 app.include_router(webhooks_router, prefix="/api/v1")
+app.include_router(lead_qualification_router, prefix="/api/v1")
 
 
 @app.get("/healthz", tags=["ops"])

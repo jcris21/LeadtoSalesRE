@@ -52,14 +52,72 @@ class PropertyType(StrEnum):
     OTHER = "other"
 
 
-#: The five dimensions progressive profiling must fill (Architecture.md §6.2).
+class FinancingType(StrEnum):
+    """How the buyer intends to pay — one of the seven profile dimensions
+    (US-208)."""
+
+    CASH = "cash"
+    MORTGAGE_APPROVED = "mortgage_approved"
+    MORTGAGE_PREAPPROVED = "mortgage_preapproved"
+    EVALUATING = "evaluating"
+
+
+class DecisionMakerMode(StrEnum):
+    """Who is involved in the purchase decision — one of the seven profile
+    dimensions (US-208)."""
+
+    SOLO = "solo"
+    COUPLE = "couple"
+    FAMILY = "family"
+
+
+class Motivation(StrEnum):
+    """Why the buyer is purchasing — ninth profile dimension (US-219)."""
+
+    RELOCATION = "relocation"
+    INVESTMENT = "investment"
+    VACATION = "vacation"
+    FIRST_HOME = "first_home"
+
+
+#: The nine dimensions progressive profiling must fill (Architecture.md §6.2,
+#: extended by US-208 with financing_type and decision_maker_mode, by the
+#: 2026-07-19 E2E review with bedrooms, and by US-219 with motivation).
+#:
+#: US-222 (superseding US-217): ordered Nivel 1 (qualification-blocking) before
+#: Nivel 2 (post-selection follow-up), so `missing_dimensions()[0]` (the
+#: directed next question, see `CompletenessGate`) always exhausts Nivel 1
+#: first. Nivel 1 is exactly the six dimensions the search pipeline itself
+#: consumes — `budget`/`locations`/`property_type`/`bedrooms` are hard filters
+#: in `StructuredFilterService.filter_candidates`, `must_haves` refines
+#: `SemanticRetrievalService`'s similarity ranking, `motivation` shapes which
+#: properties are worth surfacing at all. `timeline`, `financing_type`, and
+#: `decision_maker_mode` are Nivel 2: sales-follow-up signals `RankingEngine`
+#: never consumes, asked by the new post-selection follow-up turn
+#: (`qualification-followup-turn`) once the lead has picked a specific
+#: recommended property — not required to reach the recommendation itself.
 PROFILE_DIMENSIONS: tuple[str, ...] = (
     "budget",
     "locations",
     "property_type",
-    "timeline",
+    "bedrooms",
+    "motivation",
     "must_haves",
+    "timeline",
+    "financing_type",
+    "decision_maker_mode",
 )
+
+#: US-219: dimensions that do not apply to certain property types, excluded
+#: from `missing_dimensions()`/`completeness()` so the Coordinator never asks
+#: (or holds a profile incomplete for) an irrelevant Nivel 2 question — e.g. a
+#: land/commercial purchase has no bedroom count to ask about (the closest
+#: existing dimension to the HU's "no preguntar piso si es casa" example,
+#: since this codebase has no separate floor/piso dimension).
+_INAPPLICABLE_DIMENSIONS_BY_PROPERTY_TYPE: dict[PropertyType, frozenset[str]] = {
+    PropertyType.LAND: frozenset({"bedrooms"}),
+    PropertyType.COMMERCIAL: frozenset({"bedrooms"}),
+}
 
 
 class ProfileValidationError(ValueError):
@@ -92,12 +150,18 @@ class ProfilePatch(ValueObject):
     property_type: PropertyType | None = None
     timeline: Timeline | None = None
     must_haves: tuple[str, ...] | None = None
+    financing_type: FinancingType | None = None
+    decision_maker_mode: DecisionMakerMode | None = None
+    bedrooms: int | None = None
+    motivation: Motivation | None = None
 
     def __post_init__(self) -> None:
         if self.locations is not None and not self.locations:
             raise ProfileValidationError("locations patch cannot be an empty list")
         if self.must_haves is not None and not self.must_haves:
             raise ProfileValidationError("must_haves patch cannot be an empty list")
+        if self.bedrooms is not None and not 1 <= self.bedrooms <= 15:
+            raise ProfileValidationError("bedrooms must be between 1 and 15")
 
     def is_empty(self) -> bool:
         return all(
@@ -119,6 +183,10 @@ class BuyerProfile(Entity):
         property_type: PropertyType | None = None,
         timeline: Timeline | None = None,
         must_haves: tuple[str, ...] = (),
+        financing_type: FinancingType | None = None,
+        decision_maker_mode: DecisionMakerMode | None = None,
+        bedrooms: int | None = None,
+        motivation: Motivation | None = None,
         updated_at: datetime | None = None,
     ) -> None:
         self.id = id or new_id()
@@ -128,6 +196,10 @@ class BuyerProfile(Entity):
         self.property_type = property_type
         self.timeline = timeline
         self.must_haves = must_haves
+        self.financing_type = financing_type
+        self.decision_maker_mode = decision_maker_mode
+        self.bedrooms = bedrooms
+        self.motivation = motivation
         self.updated_at = updated_at or utcnow()
 
     def apply(self, patch: ProfilePatch) -> None:
@@ -141,6 +213,14 @@ class BuyerProfile(Entity):
             self.timeline = patch.timeline
         if patch.must_haves is not None:
             self.must_haves = tuple(patch.must_haves)
+        if patch.financing_type is not None:
+            self.financing_type = patch.financing_type
+        if patch.decision_maker_mode is not None:
+            self.decision_maker_mode = patch.decision_maker_mode
+        if patch.bedrooms is not None:
+            self.bedrooms = patch.bedrooms
+        if patch.motivation is not None:
+            self.motivation = patch.motivation
         self.updated_at = utcnow()
 
     def captured_dimensions(self) -> tuple[str, ...]:
@@ -155,15 +235,93 @@ class BuyerProfile(Entity):
             captured.append("timeline")
         if self.must_haves:
             captured.append("must_haves")
+        if self.financing_type is not None:
+            captured.append("financing_type")
+        if self.decision_maker_mode is not None:
+            captured.append("decision_maker_mode")
+        if self.bedrooms is not None:
+            captured.append("bedrooms")
+        if self.motivation is not None:
+            captured.append("motivation")
         return tuple(captured)
+
+    def _inapplicable_dimensions(self) -> frozenset[str]:
+        """US-219: dimensions that do not apply to this profile's
+        `property_type` (e.g. `bedrooms` for LAND/COMMERCIAL). Unknown/absent
+        `property_type` excludes nothing — filtering only kicks in once the
+        type is actually known."""
+        if self.property_type is None:
+            return frozenset()
+        return _INAPPLICABLE_DIMENSIONS_BY_PROPERTY_TYPE.get(self.property_type, frozenset())
 
     def missing_dimensions(self) -> tuple[str, ...]:
         captured = set(self.captured_dimensions())
-        return tuple(d for d in PROFILE_DIMENSIONS if d not in captured)
+        inapplicable = self._inapplicable_dimensions()
+        return tuple(
+            d for d in PROFILE_DIMENSIONS if d not in captured and d not in inapplicable
+        )
 
     def completeness(self) -> float:
-        """Percent of required dimensions captured, 0.0–100.0."""
-        return 100.0 * len(self.captured_dimensions()) / len(PROFILE_DIMENSIONS)
+        """Percent of required dimensions captured, 0.0–100.0. Dimensions that
+        do not apply to this profile's `property_type` (US-219) are excluded
+        from the denominator so a lead can reach 100% without ever answering
+        an irrelevant Nivel 2 question."""
+        applicable_total = len(PROFILE_DIMENSIONS) - len(self._inapplicable_dimensions())
+        if applicable_total <= 0:
+            return 100.0
+        return 100.0 * len(self.captured_dimensions()) / applicable_total
+
+
+class ObjectionType(StrEnum):
+    """One of the five sales-objection categories the AI Agent tracks
+    (US-209)."""
+
+    PRECIO = "precio"
+    ZONA = "zona"
+    FINANCIAMIENTO = "financiamiento"
+    TAMANO = "tamano"
+    TIEMPO = "tiempo"
+
+
+class LeadClassification(StrEnum):
+    """Hot/Warm/Cold commercial-priority classification derived from
+    `Lead.lead_score` (US-209)."""
+
+    HOT = "hot"
+    WARM = "warm"
+    COLD = "cold"
+
+
+class FinancingReadiness(StrEnum):
+    """3-state financing-readiness classification, orthogonal to the
+    Hot/Warm/Cold `LeadClassification` (US-214). See design.md
+    (lead-readiness-service-us-214) Decision 2 for the classification rule."""
+
+    READY = "ready"
+    PRE_READY = "pre_ready"
+    DISCOVERY = "discovery"
+
+
+class Objection(Entity):
+    """One detected sales objection, append-only (a lead can raise the same
+    `ObjectionType` more than once — each occurrence is its own row)."""
+
+    def __init__(
+        self,
+        *,
+        id: uuid.UUID | None = None,
+        lead_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        type: ObjectionType,
+        raw_text: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        self.id = id or new_id()
+        self.lead_id = lead_id
+        self.organization_id = organization_id
+        self.type = type
+        self.raw_text = raw_text
+        self.created_at = created_at or utcnow()
 
 
 @dataclass(frozen=True)
@@ -188,6 +346,20 @@ class ProfileCompleted(DomainEvent):
     profile: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ObjectionRecorded(DomainEvent):
+    """An `Objection` was persisted and `Lead.lead_score`/`lead_classification`
+    were recomputed (US-209). No consumer wired yet — future: notify the
+    assigned broker on Hot->Cold transitions, or push classification to
+    wacrm."""
+
+    lead_id: str = ""
+    crm_lead_id: str = ""
+    objection_type: str = ""
+    lead_score: float = 0.0
+    lead_classification: str = ""
+
+
 class Lead(AggregateRoot):
     """Local mirror of the wacrm lead. Only the Lead Sync Adapter writes it;
     every other module reads through `LeadSyncPort.get_lead` (QA-08)."""
@@ -200,6 +372,7 @@ class Lead(AggregateRoot):
         crm_lead_id: str,
         pipeline_stage: PipelineStage = PipelineStage.NEW,
         lead_score: float = 0.0,
+        lead_classification: LeadClassification = LeadClassification.HOT,
         assigned_broker_id: uuid.UUID | None = None,
         contact_reference: str | None = None,
         synced_at: datetime | None = None,
@@ -211,6 +384,7 @@ class Lead(AggregateRoot):
         self.crm_lead_id = crm_lead_id
         self.pipeline_stage = pipeline_stage
         self.lead_score = lead_score
+        self.lead_classification = lead_classification
         self.assigned_broker_id = assigned_broker_id
         self.contact_reference = contact_reference
         self.synced_at = synced_at or utcnow()
@@ -221,6 +395,16 @@ class Lead(AggregateRoot):
         re-synced before any critical business decision."""
         reference = now or utcnow()
         return (reference - self.synced_at) > timedelta(seconds=threshold_seconds)
+
+    def apply_objection_scoring(
+        self, *, lead_score: float, lead_classification: LeadClassification
+    ) -> None:
+        """US-209: apply the locally-computed score/classification after an
+        Objection is recorded. Separate from `mark_synced` since this writer
+        is local, not a wacrm mirror update (see design.md Decision 3 and the
+        Risks section on the two-writer conflict)."""
+        self.lead_score = lead_score
+        self.lead_classification = lead_classification
 
     def mark_synced(
         self,

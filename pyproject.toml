@@ -20,6 +20,11 @@ dependencies = [
     "pgvector>=0.3",
     "python-multipart>=0.0.12",
     "langgraph>=1.2.8",
+    "truststore>=0.10",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "langsmith>=0.3",
+    "psycopg[binary]>=3.3.4",
+    "psycopg-pool>=3.3.1",
 ]
 
 [dependency-groups]
@@ -44,6 +49,9 @@ ignore = ["B008"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: requires a reachable external service (e.g. Postgres); skipped by default in CI without one",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -20,32 +20,59 @@ ingestion workstream lands, purely by structural typing (no import needed).
 
 from __future__ import annotations
 
+import inspect
+import logging
 import math
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from app.modules.lead_qualification.domain.models import BuyerProfile
+from app.modules.lead_qualification.domain.models import (
+    BuyerProfile,
+    MoneyRange,
+    PropertyType,
+)
 from app.modules.recommendation.domain.models import Property, PropertyEmbedding
+
+logger = logging.getLogger(__name__)
 
 
 class PropertyLookup(Protocol):
     """The only shape Hybrid Retrieval needs from a property store.
 
-    Reconciliation contract for the ingestion agent's `PropertyRepository`:
-    it must expose these two async methods (structural typing means no
-    import or inheritance is required, only matching signatures).
+    Reconciliation contract for `PropertyRepository` (structural typing — no
+    import or inheritance required, only matching signatures).
     """
 
-    async def list_for_organization(self, organization_id: uuid.UUID) -> list[Property]:
-        """All properties currently known for this organization (pre-filter
-        candidate pool). No pagination here — Structured Filter narrows the
-        set before anything downstream needs to worry about volume."""
+    async def filter_candidates(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        budget: MoneyRange | None,
+        zones: tuple[str, ...],
+        property_type: PropertyType | None,
+        bedrooms: int | None = None,
+    ) -> list[Property]:
+        """US-303/US-222: hard-constraint filter as a SQL WHERE — same
+        semantics as `Property.matches_hard_filters` (absent constraint = no
+        clause)."""
+        ...
+
+    async def semantic_search(
+        self,
+        *,
+        candidate_ids: list[uuid.UUID],
+        query_vector: tuple[float, ...],
+        top_n: int,
+    ) -> list[Property] | None:
+        """US-304: pgvector `<->` ranking over the filtered candidates, or
+        None when the backing dialect has no pgvector (caller falls back)."""
         ...
 
     async def get_embedding(self, property_id: uuid.UUID) -> PropertyEmbedding | None:
         """The precalculated vector for one property, or None if the
-        Ingestion Pipeline hasn't computed one yet (new/changed property)."""
+        Ingestion Pipeline hasn't computed one yet (new/changed property).
+        Used only by the in-memory fallback path."""
         ...
 
 
@@ -97,16 +124,16 @@ class StructuredFilterService:
     async def filter_candidates(
         self, *, organization_id: uuid.UUID, buyer_profile: BuyerProfile
     ) -> list[Property]:
-        properties = await self._store.list_for_organization(organization_id)
-        return [
-            candidate
-            for candidate in properties
-            if candidate.matches_hard_filters(
-                budget=buyer_profile.budget,
-                zones=buyer_profile.locations,
-                property_type=buyer_profile.property_type,
-            )
-        ]
+        # US-303: the WHERE clause runs in the database — the full catalog is
+        # never loaded into Python. `Property.matches_hard_filters` remains
+        # the domain's executable specification of these semantics.
+        return await self._store.filter_candidates(
+            organization_id,
+            budget=buyer_profile.budget,
+            zones=buyer_profile.locations,
+            property_type=buyer_profile.property_type,
+            bedrooms=buyer_profile.bedrooms,
+        )
 
 
 class SemanticRetrievalService:
@@ -117,7 +144,9 @@ class SemanticRetrievalService:
         self,
         store: PropertyLookup,
         *,
-        embed_query: Callable[[BuyerProfile], tuple[float, ...]] = _default_embed_query,
+        embed_query: Callable[
+            [BuyerProfile], tuple[float, ...] | Awaitable[tuple[float, ...]]
+        ] = _default_embed_query,
     ) -> None:
         self._store = store
         self._embed_query = embed_query
@@ -128,7 +157,37 @@ class SemanticRetrievalService:
         if not candidates:
             return []
 
-        query_vector = self._embed_query(buyer_profile)
+        try:
+            query_vector = self._embed_query(buyer_profile)
+            if inspect.isawaitable(query_vector):
+                query_vector = await query_vector
+        except Exception:  # noqa: BLE001 — degraded ranking beats no recommendation
+            logger.exception(
+                "Query embedding failed; returning hard-filtered candidates unranked"
+            )
+            return candidates[:top_n]
+
+        # US-304: SQL-first — on Postgres the ranking happens in the database
+        # via pgvector `<->` and no cosine similarity runs in Python. A store
+        # without the capability (SQLite tests, in-memory fakes) returns None
+        # (or lacks the method) and the in-memory path below takes over.
+        # G2 guard: pgvector `<->` on mismatched dimensionality raises and
+        # aborts the handler's transaction, so the SQL path only runs when the
+        # query vector's length matches the stored embeddings (e.g. keyless
+        # 3-dim default vs vector(1536) store routes to the in-memory path,
+        # which degrades to neutral scores instead of crashing).
+        sql_search = getattr(self._store, "semantic_search", None)
+        if sql_search is not None and await self._dimensions_match(candidates, query_vector):
+            ranked = await sql_search(
+                candidate_ids=[candidate.id for candidate in candidates],
+                query_vector=query_vector,
+                top_n=top_n,
+            )
+            if ranked is not None:
+                logger.debug("Semantic retrieval served by pgvector <-> query")
+                return ranked
+
+        logger.debug("Semantic retrieval falling back to in-memory cosine ranking")
         scored: list[tuple[float, Property]] = []
         for candidate in candidates:
             embedding = await self._store.get_embedding(candidate.id)
@@ -140,3 +199,16 @@ class SemanticRetrievalService:
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [candidate for _, candidate in scored[:top_n]]
+
+    async def _dimensions_match(
+        self, candidates: list[Property], query_vector: tuple[float, ...]
+    ) -> bool:
+        """Probes one stored embedding (they all share the ingestion model) and
+        compares its length with the query vector's. False when nothing is
+        embedded yet — the SQL inner join and the in-memory path would both
+        yield [] there, so skipping SQL loses nothing."""
+        for candidate in candidates:
+            embedding = await self._store.get_embedding(candidate.id)
+            if embedding is not None:
+                return len(tuple(embedding.vector)) == len(query_vector)
+        return False

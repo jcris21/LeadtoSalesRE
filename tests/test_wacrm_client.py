@@ -144,6 +144,47 @@ class TestGetLead:
         assert await client.get_lead("missing") is None
 
 
+class TestCreateLead:
+    @pytest.mark.asyncio
+    async def test_posts_deal_with_contact_and_new_stage(self):
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path.endswith("/deals")
+            bodies.append(json.loads(request.content))
+            return httpx.Response(201, json={"data": _deal("d9", pipeline_stage="New")})
+
+        client = _client_with(handler)
+        snapshot = await client.create_lead(
+            contact_reference="+51999888777", contact_name="Ana Torres"
+        )
+        assert snapshot.crm_lead_id == "d9"
+        assert snapshot.organization_id == ORG_ID
+        # dni absent -> key omitted entirely, mirroring update_stage's convention.
+        assert bodies == [
+            {
+                "contact_phone": "+51999888777",
+                "contact_name": "Ana Torres",
+                "stage_name": "New",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_includes_dni_only_when_given(self):
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return httpx.Response(201, json={"data": _deal("d9", pipeline_stage="New")})
+
+        client = _client_with(handler)
+        await client.create_lead(
+            contact_reference="+51999888777", contact_name="Ana Torres", dni="45678912"
+        )
+        assert bodies[0]["contact_dni"] == "45678912"
+
+
 class TestUpdateStage:
     @pytest.mark.asyncio
     async def test_patches_stage_name_and_omits_absent_broker(self):

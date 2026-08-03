@@ -12,9 +12,12 @@ Architecture.md §6.1) and these tests verify:
 
 import uuid
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from app.modules.conversation_ownership.application.langgraph_responder import (
     LangGraphResponder,
     TemplateBrain,
+    _fold_summary,
 )
 
 
@@ -77,3 +80,107 @@ async def test_template_brain_is_deterministic_and_history_aware():
 
     assert "asistente del equipo de asesores" in first
     assert first != second  # follow-up turns acknowledge the ongoing conversation
+
+
+# --- G13: windowed history + deterministic summary -------------------------
+
+
+def test_fold_summary_is_deterministic_and_length_capped():
+    dropped = [
+        {"role": "user", "content": "turno 1"},
+        {"role": "assistant", "content": "reply-1"},
+    ]
+
+    first = _fold_summary("", dropped)
+    second = _fold_summary(first, dropped)  # same fold applied again
+
+    assert first == _fold_summary("", dropped)  # deterministic: same inputs, same output
+    assert "turno 1" in first and "reply-1" in first
+
+    # Repeated folding over a long conversation never grows past the cap.
+    summary = ""
+    long_turn = [
+        {"role": "user", "content": "x" * 500},
+        {"role": "assistant", "content": "y" * 500},
+    ]
+    for _ in range(50):
+        summary = _fold_summary(summary, long_turn)
+        assert len(summary) <= 1500
+    assert len(second) <= 1500
+
+
+async def test_window_truncates_messages_and_folds_evicted_turns_into_summary():
+    brain = RecordingBrain()
+    responder = LangGraphResponder(brain=brain, history_window_turns=2)
+    conversation_id = uuid.uuid4()
+
+    for text in ("turno 1", "turno 2", "turno 3"):
+        await responder.respond(system_prompt="p", conversation_id=conversation_id, text=text)
+
+    history = await responder.history(conversation_id)
+
+    # Window holds the last 2 turns (4 messages) plus a leading summary entry
+    # for the evicted first turn.
+    assert history[0]["role"] == "system"
+    assert "turno 1" in history[0]["content"]
+    contents = [m["content"] for m in history[1:]]
+    assert contents == ["turno 2", "reply-2", "turno 3", "reply-3"]
+    assert "turno 1" not in contents  # evicted turn only survives in the summary
+
+
+async def test_summary_reaches_brain_once_truncation_has_occurred():
+    brain = RecordingBrain()
+    responder = LangGraphResponder(brain=brain, history_window_turns=1)
+    conversation_id = uuid.uuid4()
+
+    await responder.respond(system_prompt="p", conversation_id=conversation_id, text="turno 1")
+    # First turn: nothing evicted yet, brain sees empty history, no summary.
+    assert brain.seen_histories[0] == []
+
+    await responder.respond(system_prompt="p", conversation_id=conversation_id, text="turno 2")
+    # Second turn triggers eviction of turn 1 into the summary; third turn's
+    # brain call should receive that summary as a leading system entry.
+    await responder.respond(system_prompt="p", conversation_id=conversation_id, text="turno 3")
+
+    third_turn_history = brain.seen_histories[2]
+    assert third_turn_history[0]["role"] == "system"
+    assert "turno 1" in third_turn_history[0]["content"]
+
+
+async def test_restart_simulation_new_responder_instance_resumes_shared_checkpoint():
+    """The actual G13 acceptance criterion: a new `LangGraphResponder`
+    instance (simulating a process restart) sharing the same checkpointer and
+    `thread_id` resumes prior conversational context instead of starting cold."""
+    shared_checkpointer = InMemorySaver()
+    conversation_id = uuid.uuid4()
+
+    responder_a = LangGraphResponder(brain=RecordingBrain(), checkpointer=shared_checkpointer)
+    await responder_a.respond(system_prompt="p", conversation_id=conversation_id, text="turno 1")
+
+    # Simulate a process restart: brand-new instance, same checkpointer + thread_id.
+    brain_b = RecordingBrain()
+    responder_b = LangGraphResponder(brain=brain_b, checkpointer=shared_checkpointer)
+
+    history = await responder_b.history(conversation_id)
+    assert [m["content"] for m in history] == ["turno 1", "reply-1"]
+
+    await responder_b.respond(system_prompt="p", conversation_id=conversation_id, text="turno 2")
+    assert brain_b.seen_histories[0] == [
+        {"role": "user", "content": "turno 1"},
+        {"role": "assistant", "content": "reply-1"},
+    ]
+
+
+async def test_respond_is_traceable_and_still_returns_brain_reply_when_tracing_disabled():
+    """Characterization test: decorating respond() with @traceable must not
+    change its return value or the checkpointed history it produces."""
+    responder = LangGraphResponder(brain=RecordingBrain())
+    conversation_id = uuid.uuid4()
+
+    reply = await responder.respond(
+        system_prompt="prompt", conversation_id=conversation_id, text="hola, soy Ana, 987654321"
+    )
+
+    assert reply == "reply-1"
+    history = await responder.history(conversation_id)
+    assert history[0]["content"] == "hola, soy Ana, 987654321"  # real (unredacted) data persists

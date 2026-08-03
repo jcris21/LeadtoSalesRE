@@ -23,29 +23,91 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
+from app.modules.conversation_ownership.application.deepening_turn import run_deepening_turn
+from app.modules.conversation_ownership.application.followup_turn import run_followup_turn
 from app.modules.conversation_ownership.application.guardrail import GuardrailInterceptor
+from app.modules.conversation_ownership.application.intent_router import (
+    IntentCategory,
+    IntentRouterPort,
+    get_default_intent_router,
+)
+from app.modules.conversation_ownership.application.link_guard import guard_reply
 from app.modules.conversation_ownership.application.ownership_policy import (
     OwnershipContext,
     OwnershipDecision,
     OwnershipPolicyEngine,
 )
+from app.modules.conversation_ownership.application.scheduling_turn import run_scheduling_turn
 from app.modules.conversation_ownership.application.sidebar import SidebarPublisher
+from app.modules.knowledge.application.knowledge_service import (
+    KnowledgeService,
+    build_default_query_embedder,
+)
+from app.modules.knowledge.domain.models import KnowledgeAnswer
 from app.modules.conversation_ownership.domain.models import (
     Conversation,
     ConversationState,
     OwnerType,
     ResponseReady,
 )
+from app.modules.conversation_ownership.domain.prompts import DEFAULT_SYSTEM_PROMPT
 from app.modules.conversation_ownership.infrastructure.repository import (
     ConversationRepository,
     OwnershipDecisionRepository,
 )
+from app.modules.conversation_ownership.application.lead_linker import LeadLinker
+from app.modules.lead_qualification.application.identity_extraction import (
+    REPROMPT_DNI,
+    REPROMPT_IDENTITY,
+    extract_dni,
+    extract_identity,
+)
+from app.modules.lead_qualification.application.lead_sync import LeadSyncAdapter
+from app.modules.lead_qualification.application.qualification_turn import (
+    QualificationTurnResult,
+    run_qualification_turn,
+)
+from app.modules.lead_qualification.infrastructure.generative_extractor import (
+    GenerativeExtractorPort,
+    get_default_generative_extractor,
+)
+from app.modules.lead_qualification.infrastructure.repository import BuyerProfileRepository
+from app.modules.lead_qualification.infrastructure.wacrm_client import WacrmClient
+from app.modules.recommendation.application.search_diagnostics import (
+    diagnose,
+    render_grounding_note,
+)
+from app.modules.recommendation.infrastructure.repository import PropertyRepository
 from app.shared.infrastructure import event_bus
 from app.shared.infrastructure.observability import trace_decision
 
 logger = logging.getLogger(__name__)
 
 AGENT_NAME = "coordinator"
+
+#: AI-105: the only two `IntentCategory` values that consume `KnowledgeService.answer` this
+#: change — matches the HU doc's own AI-106 Gherkin ("clasifica el mensaje como Objeción o
+#: Pregunta informativa"). See design.md's decision table for why every other category is a
+#: deliberate no-op.
+_KNOWLEDGE_INTENT_CATEGORIES = frozenset({"objecion", "pregunta_informativa"})
+
+#: US-218: the DNI nudge only fires once a recommendation/value moment has
+#: been shown (HU_Calificacion_Recomendacion.md US-218's Gherkin: "se pospone
+#: hasta después de GeminiRecommendationNarrator.narrate o de un intercambio
+#: de valor equivalente"). Confined to RECOMMENDATION itself — not the states
+#: after it (Appointment, Visit, ...) — so the nudge has a naturally bounded
+#: window without needing a new `leads` column to remember "already asked"
+#: (US-218's own alignment note (d): no schema change for this change).
+_DNI_ELIGIBLE_STATES = frozenset({ConversationState.RECOMMENDATION})
+
+
+class KnowledgeAnswererPort(Protocol):
+    """AI-105 seam: `KnowledgeService.answer` already satisfies this structurally (extra
+    defaulted `category`/`top_k` kwargs). Constructor-injectable, same DI pattern as
+    `responder`/`generative_extractor`/`intent_router`."""
+
+    async def answer(self, organization_id: uuid.UUID, query: str) -> KnowledgeAnswer: ...
 
 
 class ResponderPort(Protocol):
@@ -82,6 +144,10 @@ class CoordinatorAgent:
         guardrail: GuardrailInterceptor | None = None,
         policy_engine: OwnershipPolicyEngine | None = None,
         sidebar: SidebarPublisher | None = None,
+        generative_extractor: GenerativeExtractorPort | None = None,
+        wacrm_client: WacrmClient | None = None,
+        intent_router: IntentRouterPort | None = None,
+        knowledge_answerer: KnowledgeAnswererPort | None = None,
     ):
         from app.modules.conversation_ownership.application.langgraph_responder import (
             get_default_responder,
@@ -92,6 +158,12 @@ class CoordinatorAgent:
         self._guardrail = guardrail or GuardrailInterceptor()
         self._policy_engine = policy_engine or OwnershipPolicyEngine()
         self._sidebar = sidebar
+        self._generative_extractor = generative_extractor or get_default_generative_extractor()
+        self._wacrm_client = wacrm_client
+        self._intent_router = intent_router or get_default_intent_router()
+        self._knowledge_answerer = knowledge_answerer or KnowledgeService(
+            session, build_default_query_embedder(get_settings().gemini_api_key)
+        )
         self._conversations = ConversationRepository(session)
         self._decisions = OwnershipDecisionRepository(session)
 
@@ -120,7 +192,33 @@ class CoordinatorAgent:
                     {"action": "guardrail_bypass", "explanation": decision.explanation}
                 )
             else:
-                response = await self._conversational_turn(conversation, text)
+                intent_category = await self._classify_intent(text, recorder)
+                ask_identity, identity_consumed = await self._identity_gate(
+                    conversation, text, recorder
+                )
+                dni_nudge, dni_consumed = await self._dni_gate(conversation, text, recorder)
+                # A message consumed as identity (name/DNI) or as a deferred
+                # DNI reply is not a qualification signal: the 8-digit DNI
+                # would reach the budget extractor and corrupt the profile.
+                # Qualification starts on the NEXT message.
+                qualification = (
+                    None
+                    if identity_consumed or dni_consumed
+                    else await self._qualification_turn(conversation, text)
+                )
+                if qualification is not None:
+                    recorder.record_tool_call(
+                        "qualification.run_turn", {"text": text}, qualification.summary()
+                    )
+                response = await self._conversational_turn(
+                    conversation,
+                    text,
+                    qualification,
+                    ask_identity=ask_identity,
+                    dni_nudge=dni_nudge,
+                    recorder=recorder,
+                    intent_category=intent_category,
+                )
                 recorder.set_output({"action": "reply", "response": response})
 
         await self._conversations.save(conversation)
@@ -159,7 +257,119 @@ class CoordinatorAgent:
         )
         return decision
 
-    async def _conversational_turn(self, conversation: Conversation, text: str) -> str:
+    async def _classify_intent(self, text: str, recorder) -> IntentCategory | None:
+        """AI-104 records the message's classified intent category on this
+        turn's AIDecisionTrace. AI-105: the category is now also returned to
+        the caller so `_conversational_turn` can branch on it (see
+        `_knowledge_turn`) — a classifier failure must never affect the
+        reply, same contract as `_build_grounding_note` (returns `None`,
+        exactly as if no classification step existed)."""
+        try:
+            category = await self._intent_router.classify(text)
+        except Exception:  # noqa: BLE001 — classification must never break the turn
+            logger.exception("Intent classification failed; continuing without it")
+            return None
+        recorder.record_tool_call("intent_router.classify", {"text": text}, category)
+        return category
+
+    async def _identity_gate(
+        self, conversation: Conversation, text: str, recorder
+    ) -> tuple[bool, bool]:
+        """G8: leads are born in the chat itself. While the conversation has no
+        linked Lead, the reply asks the contact for their name; the first
+        message carrying one creates the deal in wacrm (SoR) and mirrors it
+        locally in the same transaction — no waiting for the CDC poll, and no
+        new conversation state. Returns `(ask_identity, identity_consumed)`:
+        `ask_identity` when this turn's reply must (still) ask for identity,
+        `identity_consumed` when this message WAS the name/DNI answer — the
+        caller must then keep it away from the qualification extractors."""
+        if conversation.lead_id is not None or not conversation.contact_reference:
+            return False, False
+        # The lead may already exist (walk-in registered by a broker, or CDC
+        # landed since the webhook's own attempt) — link, never duplicate.
+        if await LeadLinker(self._session).link_if_possible(conversation) is not None:
+            return False, False
+        identity = extract_identity(text)
+        if identity is None:
+            return True, False
+        try:
+            client = self._wacrm_client or await self._build_wacrm_client(
+                conversation.organization_id
+            )
+            lead = await LeadSyncAdapter(self._session, client=client).create_lead(
+                conversation.organization_id,
+                contact_reference=conversation.contact_reference,
+                contact_name=identity.full_name,
+                dni=identity.dni,
+                actor=AGENT_NAME,
+            )
+        except Exception:  # noqa: BLE001 — a CRM outage must never kill the reply
+            logger.exception(
+                "wacrm lead creation failed for conversation %s; will retry next turn",
+                conversation.id,
+            )
+            return True, False
+        conversation.link_lead(lead.id)
+        recorder.record_tool_call(
+            "identity.create_lead",
+            {"text": text},
+            f"lead:{lead.crm_lead_id} name:{identity.full_name} dni:{identity.dni or '-'}",
+        )
+        return False, True
+
+    async def _dni_gate(
+        self, conversation: Conversation, text: str, recorder
+    ) -> tuple[str | None, bool]:
+        """US-218: deferred DNI ask. Unlike `_identity_gate`'s name gate (which
+        legitimately blocks the reply until a Lead exists to attach it to), a
+        missing DNI must never block qualification, scheduling or the
+        conversational reply — it is additive-only, appended by
+        `_conversational_turn`. Only eligible once a recommendation/value
+        moment has been shown (`_DNI_ELIGIBLE_STATES`); before that, both
+        return values are inert. Returns `(nudge, dni_consumed)`: `nudge` is
+        the text to append this turn (or None), `dni_consumed` mirrors
+        `identity_consumed` above — a message recognized as carrying the DNI
+        answer is not a qualification signal either."""
+        if conversation.lead_id is None or conversation.state not in _DNI_ELIGIBLE_STATES:
+            return None, False
+        dni = extract_dni(text)
+        if dni is not None:
+            recorder.record_tool_call("identity.capture_dni", {"text": text}, f"dni:{dni}")
+            return None, True
+        return REPROMPT_DNI, False
+
+    async def _build_wacrm_client(self, organization_id: uuid.UUID) -> WacrmClient:
+        from app.modules.lead_qualification.wiring import build_wacrm_client
+
+        return await build_wacrm_client(self._session, organization_id)
+
+    async def _qualification_turn(
+        self, conversation: Conversation, text: str
+    ) -> QualificationTurnResult | None:
+        """G1: the chat itself fills the BuyerProfile. Skipped while no Lead is
+        linked yet (wacrm CDC is eventually consistent, §7.7) — the
+        conversational reply still happens, and qualification resumes on the
+        first turn after `LeadLinker` resolves the link."""
+        if conversation.lead_id is None:
+            return None
+        return await run_qualification_turn(
+            self._session,
+            lead_id=conversation.lead_id,
+            organization_id=conversation.organization_id,
+            text=text,
+            generative_extractor=self._generative_extractor,
+        )
+
+    async def _conversational_turn(
+        self,
+        conversation: Conversation,
+        text: str,
+        qualification: QualificationTurnResult | None = None,
+        ask_identity: bool = False,
+        dni_nudge: str | None = None,
+        recorder=None,
+        intent_category: IntentCategory | None = None,
+    ) -> str:
         if conversation.state is ConversationState.NEW:
             decision = self._policy_engine.evaluate(OwnershipContext(conversation=conversation))
             await self._decisions.add(
@@ -189,9 +399,106 @@ class CoordinatorAgent:
                 reason="Ownership assigned to AI; beginning conversational qualification",
             )
 
+        deepening = await self._deepening_turn(conversation, text, recorder)
+        if deepening is not None and deepening.outcome == "asked":
+            # US-220: confirms which Top-3 option interested the lead before
+            # a scheduling slot is trusted to resolve a specific property —
+            # deterministic text, never LLM output, same short-circuit
+            # posture as `_scheduling_turn`'s own non-`no_slot` outcomes.
+            response = deepening.response or ""
+            conversation.record_event(
+                ResponseReady(
+                    organization_id=conversation.organization_id,
+                    conversation_id=str(conversation.id),
+                    chatwoot_conversation_id=conversation.chatwoot_conversation_id,
+                    response=response,
+                )
+            )
+            return response
+
+        # US-222: the deepening turn's Top-3 disambiguation question always
+        # wins when both would have something to ask this turn (spec:
+        # "Top-3 disambiguation question takes precedence") — `deepening` is
+        # only non-None here for "selected"/"asked" outcomes (the "asked"
+        # branch above already returned), so a fresh "selected" this turn is
+        # allowed to fall through into the follow-up check immediately.
+        followup = await self._followup_turn(conversation, text, recorder)
+        if followup is not None and followup.outcome == "asked":
+            # US-222: asks for the first missing Nivel 2 dimension
+            # (timeline/financing_type/decision_maker_mode) once the lead has
+            # selected a specific recommended property — purely additive,
+            # never blocks scheduling (checked via `extract_confirmed_slot`
+            # implicitly: a lead who answers with a slot instead reaches
+            # `_scheduling_turn` on their NEXT message, same posture as the
+            # deepening turn's own non-blocking design).
+            response = followup.response or ""
+            conversation.record_event(
+                ResponseReady(
+                    organization_id=conversation.organization_id,
+                    conversation_id=str(conversation.id),
+                    chatwoot_conversation_id=conversation.chatwoot_conversation_id,
+                    response=response,
+                )
+            )
+            return response
+
+        scheduling = await self._scheduling_turn(conversation, text, recorder)
+        if scheduling is not None and scheduling.outcome != "no_slot":
+            # `guard_reply` polices LLM output for hallucinated property
+            # links (link_guard.py docstring) — this message is deterministic,
+            # service-composed text (the booking confirmation's `meet_link`
+            # comes straight from `GoogleCalendarPort`, the fallback messages
+            # are static strings), never LLM free text, so it bypasses the
+            # guard the same way the real Top-3 message already does
+            # (`recommendation.wiring`, per that docstring's own note).
+            response = scheduling.response or ""
+            conversation.record_event(
+                ResponseReady(
+                    organization_id=conversation.organization_id,
+                    conversation_id=str(conversation.id),
+                    chatwoot_conversation_id=conversation.chatwoot_conversation_id,
+                    response=response,
+                )
+            )
+            return response
+
         system_prompt = await self._load_system_prompt(conversation.organization_id)
+        grounding_note = await self._build_grounding_note(conversation, recorder)
+        if grounding_note:
+            system_prompt = f"{system_prompt}\n\n{grounding_note}"
         response = await self._responder.respond(
             system_prompt=system_prompt, conversation_id=conversation.id, text=text
+        )
+        knowledge_answer = await self._knowledge_turn(
+            conversation, text, intent_category, recorder
+        )
+        if knowledge_answer is not None:
+            # AI-105: a grounded objection/Q&A answer replaces the LLM's freeform
+            # reply — still subordinate to the reprompt/ask_identity overrides
+            # below (design.md precedence: identity > reprompt > knowledge >
+            # default response).
+            response = knowledge_answer
+        if qualification is not None and qualification.reprompts:
+            # An extractor saw a signal but couldn't validate it (e.g. a broken
+            # budget) — its re-prompt IS the right reply this turn. The
+            # responder still ran so the checkpointed history stays contiguous.
+            response = qualification.reprompts[0]
+        if ask_identity:
+            # G8 gate: no Lead linked yet — the reply asks for the contact's
+            # name (mutually exclusive with qualification re-prompts, which
+            # require a linked lead).
+            response = REPROMPT_IDENTITY
+        elif dni_nudge:
+            # US-218: additive-only — a value moment has already been shown
+            # (RECOMMENDATION), so the reply keeps whatever it already was
+            # (recommendation follow-up, scheduling, knowledge answer, ...)
+            # and the deferred DNI ask rides along as a second line, never
+            # replacing it (mutually exclusive with `ask_identity`: that gate
+            # requires no Lead, this one requires a linked Lead already in
+            # RECOMMENDATION).
+            response = f"{response}\n\n{dni_nudge}"
+        response = await guard_reply(
+            self._session, organization_id=conversation.organization_id, reply=response
         )
         conversation.record_event(
             ResponseReady(
@@ -202,6 +509,146 @@ class CoordinatorAgent:
             )
         )
         return response
+
+    async def _deepening_turn(self, conversation: Conversation, text: str, recorder):
+        """US-220: only meaningful in `RECOMMENDATION` — aditive-only, same
+        gating posture as `_scheduling_turn`/`_build_grounding_note`. Runs
+        BEFORE `_scheduling_turn` so a lead's option selection ("opción 2")
+        is captured before any slot in the same/later message is resolved
+        against the wrong (rank-1) property."""
+        if conversation.state is not ConversationState.RECOMMENDATION:
+            return None
+        result = await run_deepening_turn(self._session, conversation=conversation, text=text)
+        if result.outcome == "not_applicable":
+            return None
+        if recorder is not None:
+            recorder.record_tool_call("deepening.run_turn", {"text": text}, result.outcome)
+        return result
+
+    async def _followup_turn(self, conversation: Conversation, text: str, recorder):
+        """US-222: only meaningful in `RECOMMENDATION` — additive-only, same
+        gating posture as `_deepening_turn`. Runs AFTER `_deepening_turn`'s
+        "asked" short-circuit (that question always wins) but reachable on
+        the very turn a selection resolves, since `_deepening_turn` returns
+        non-None for `outcome == "selected"` too, without short-circuiting."""
+        if conversation.state is not ConversationState.RECOMMENDATION:
+            return None
+        result = await run_followup_turn(self._session, conversation=conversation, text=text)
+        if result.outcome == "not_applicable":
+            return None
+        if recorder is not None:
+            recorder.record_tool_call("qualification.followup_turn", {"text": text}, result.outcome)
+        return result
+
+    async def _scheduling_turn(self, conversation: Conversation, text: str, recorder):
+        """US-212: only meaningful in `RECOMMENDATION` — aditive-only, same
+        gating posture as `_build_grounding_note`. A successful booking
+        transitions the FSM to `APPOINTMENT`; every other non-`no_slot`
+        outcome overrides this turn's reply with a deterministic message
+        (design.md Decision 5) so the LLM never gets a chance to claim a
+        visit is booked when it isn't."""
+        if conversation.state is not ConversationState.RECOMMENDATION:
+            return None
+        result = await run_scheduling_turn(self._session, conversation=conversation, text=text)
+        if result.outcome == "no_slot":
+            return result
+        if recorder is not None:
+            recorder.record_tool_call("scheduling.run_turn", {"text": text}, result.outcome)
+        if result.outcome == "booked":
+            conversation.transition_to(
+                ConversationState.APPOINTMENT,
+                reason="SchedulingService.book_visit succeeded",
+            )
+        return result
+
+    async def _knowledge_turn(
+        self,
+        conversation: Conversation,
+        text: str,
+        intent_category: IntentCategory | None,
+        recorder,
+    ) -> str | None:
+        """AI-105: the sole wired consumer of the classified intent category. Only
+        `objecion`/`pregunta_informativa` reach `KnowledgeService.answer` (design.md decision
+        table — every other category is a deliberate no-op, unchanged from pre-AI-105
+        behavior). A `found=False` result or any lookup failure returns `None`, letting the
+        caller keep its already-computed default responder reply — same
+        never-break-the-turn contract as `_build_grounding_note`/`_identity_gate`."""
+        if intent_category not in _KNOWLEDGE_INTENT_CATEGORIES:
+            return None
+        try:
+            answer = await self._knowledge_answerer.answer(conversation.organization_id, text)
+        except Exception:  # noqa: BLE001 — knowledge lookup must never break the turn
+            logger.exception(
+                "Knowledge lookup failed for conversation %s; continuing without it",
+                conversation.id,
+            )
+            return None
+        if not answer.found:
+            return None
+        if recorder is not None:
+            recorder.record_tool_call(
+                "knowledge.answer",
+                {"text": text, "intent_category": intent_category},
+                f"found:{len(answer.source_document_ids)}",
+            )
+        return answer.answer_text
+
+    async def _build_grounding_note(
+        self,
+        conversation: Conversation,
+        recorder,
+    ) -> str | None:
+        """US-hallucination-fix (2026-07-24, CW-DEMO-1784860599/MSG-0010): a
+        lead asked for a property under a budget with zero Supabase matches
+        and the conversational brain — which never queries `properties` —
+        invented two listings with fake links.
+
+        2026-07-25 follow-up (same conversation, later turn): the original
+        fix only ran this check on the turn that just captured budget/zone.
+        The very next turn — no new dimension, so no grounding — the LLM,
+        primed by its *own* prior "en breve tendrás el Top-3" line, invented
+        three full listings with prices and addresses (no links this time,
+        so the link guard never saw it). Gate on conversation stage instead
+        of "did this turn's message carry a new signal": every Qualification
+        turn where the profile already has a budget or a zone re-runs the
+        real structured filter, until Recommendation takes over (the
+        `RecommendationService`'s own real Top-3) and this stops being
+        needed."""
+        if conversation.lead_id is None or conversation.state is not ConversationState.QUALIFICATION:
+            return None
+        try:
+            profile = await BuyerProfileRepository(self._session).get_by_lead_id(
+                conversation.lead_id
+            )
+            if profile is None or (profile.budget is None and not profile.locations):
+                return None
+            diagnosis = await diagnose(
+                PropertyRepository(self._session),
+                organization_id=conversation.organization_id,
+                budget=profile.budget,
+                zones=profile.locations,
+                property_type=profile.property_type,
+            )
+        except Exception:  # noqa: BLE001 — grounding must never break the turn
+            logger.exception(
+                "Search diagnostics failed for conversation %s; continuing without grounding",
+                conversation.id,
+            )
+            return None
+        if diagnosis is None:
+            return None
+        if recorder is not None:
+            recorder.record_tool_call(
+                "recommendation.diagnose_search",
+                {"budget": str(diagnosis.budget), "zones": diagnosis.zones},
+                (
+                    "has_matches"
+                    if diagnosis.has_matches
+                    else ("zone_mismatch" if diagnosis.zone_mismatch else "price_mismatch")
+                ),
+            )
+        return render_grounding_note(diagnosis)
 
     async def _load_system_prompt(self, organization_id: uuid.UUID) -> str:
         """Per-organization active prompt (ConfigStorePort.get_active_prompt).
@@ -223,4 +670,4 @@ class CoordinatorAgent:
             AGENT_NAME,
             organization_id,
         )
-        return "Eres el asistente inmobiliario del equipo de asesores."
+        return DEFAULT_SYSTEM_PROMPT

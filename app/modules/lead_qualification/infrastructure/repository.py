@@ -5,13 +5,20 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
+    DecisionMakerMode,
+    FinancingReadiness,
+    FinancingType,
     Lead,
+    LeadClassification,
     MoneyRange,
+    Motivation,
+    Objection,
+    ObjectionType,
     PipelineStage,
     PropertyType,
     Timeline,
@@ -19,6 +26,7 @@ from app.modules.lead_qualification.domain.models import (
 from app.modules.lead_qualification.infrastructure.db_models import (
     BuyerProfileORM,
     CRMAccessAuditORM,
+    LeadObjectionORM,
     LeadORM,
     SyncCursorORM,
 )
@@ -76,9 +84,18 @@ class LeadRepository:
             return
         row.pipeline_stage = lead.pipeline_stage.value
         row.lead_score = lead.lead_score
+        row.lead_classification = lead.lead_classification.value
         row.assigned_broker_id = lead.assigned_broker_id
         row.contact_reference = lead.contact_reference
         row.synced_at = lead.synced_at
+
+    async def set_buyer_persona(self, lead_id: uuid.UUID, snapshot: dict) -> None:
+        """US-211: writes the persona snapshot column only — deliberately not
+        part of `save()` so the aggregator stays the sole writer and lead-sync
+        can never clobber it."""
+        row = await self._session.get(LeadORM, lead_id)
+        if row is not None:
+            row.buyer_persona = snapshot
 
     @staticmethod
     def _to_row(lead: Lead) -> LeadORM:
@@ -88,6 +105,7 @@ class LeadRepository:
             crm_lead_id=lead.crm_lead_id,
             pipeline_stage=lead.pipeline_stage.value,
             lead_score=lead.lead_score,
+            lead_classification=lead.lead_classification.value,
             assigned_broker_id=lead.assigned_broker_id,
             contact_reference=lead.contact_reference,
             synced_at=lead.synced_at,
@@ -104,6 +122,7 @@ class LeadRepository:
             crm_lead_id=row.crm_lead_id,
             pipeline_stage=PipelineStage(row.pipeline_stage),
             lead_score=row.lead_score,
+            lead_classification=LeadClassification(row.lead_classification),
             assigned_broker_id=row.assigned_broker_id,
             contact_reference=row.contact_reference,
             synced_at=_ensure_utc(row.synced_at),
@@ -135,7 +154,47 @@ class BuyerProfileRepository:
         row.property_type = profile.property_type.value if profile.property_type else None
         row.timeline = profile.timeline.value if profile.timeline else None
         row.must_haves = list(profile.must_haves)
+        row.financing_type = profile.financing_type.value if profile.financing_type else None
+        row.decision_maker_mode = (
+            profile.decision_maker_mode.value if profile.decision_maker_mode else None
+        )
+        row.bedrooms = profile.bedrooms
+        row.motivation = profile.motivation.value if profile.motivation else None
         row.updated_at = profile.updated_at
+
+    async def set_ai_profile(self, lead_id: uuid.UUID, snapshot: dict) -> bool:
+        """US-211: writes the affinity snapshot column only — deliberately not
+        part of `save()` so profile capture can never clobber it. Returns
+        False when the lead has no profile row yet (aggregator degrades
+        gracefully instead of creating one)."""
+        result = await self._session.execute(
+            select(BuyerProfileORM).where(BuyerProfileORM.lead_id == lead_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.ai_profile = snapshot
+        return True
+
+    async def set_readiness(
+        self,
+        lead_id: uuid.UUID,
+        *,
+        readiness_score: float,
+        financing_readiness: FinancingReadiness,
+    ) -> bool:
+        """US-214: writes readiness_score/financing_readiness only --
+        design.md Decision 3, same isolated-writer contract as set_ai_profile.
+        Returns False when the lead has no profile row yet."""
+        result = await self._session.execute(
+            select(BuyerProfileORM).where(BuyerProfileORM.lead_id == lead_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.readiness_score = readiness_score
+        row.financing_readiness = financing_readiness.value
+        return True
 
     @staticmethod
     def _to_domain(row: BuyerProfileORM) -> BuyerProfile:
@@ -150,7 +209,67 @@ class BuyerProfileRepository:
             property_type=PropertyType(row.property_type) if row.property_type else None,
             timeline=Timeline(row.timeline) if row.timeline else None,
             must_haves=tuple(row.must_haves or ()),
+            financing_type=FinancingType(row.financing_type) if row.financing_type else None,
+            decision_maker_mode=(
+                DecisionMakerMode(row.decision_maker_mode) if row.decision_maker_mode else None
+            ),
+            bedrooms=row.bedrooms,
+            motivation=Motivation(row.motivation) if row.motivation else None,
             updated_at=row.updated_at,
+        )
+
+
+class LeadObjectionRepository:
+    """Append-only sales-objection log persistence (US-209)."""
+
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def add(self, objection: Objection) -> None:
+        self._session.add(
+            LeadObjectionORM(
+                id=objection.id,
+                organization_id=objection.organization_id,
+                lead_id=objection.lead_id,
+                type=objection.type.value,
+                raw_text=objection.raw_text,
+                created_at=objection.created_at,
+            )
+        )
+
+    async def list_for_lead(self, lead_id: uuid.UUID) -> list[Objection]:
+        result = await self._session.execute(
+            select(LeadObjectionORM)
+            .where(LeadObjectionORM.lead_id == lead_id)
+            .order_by(LeadObjectionORM.created_at)
+        )
+        return [self._to_domain(row) for row in result.scalars().all()]
+
+    async def count_for_lead(self, lead_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count()).select_from(LeadObjectionORM).where(
+                LeadObjectionORM.lead_id == lead_id
+            )
+        )
+        return int(result.scalar_one())
+
+    async def count_distinct_types_for_lead(self, lead_id: uuid.UUID) -> int:
+        result = await self._session.execute(
+            select(func.count(func.distinct(LeadObjectionORM.type))).where(
+                LeadObjectionORM.lead_id == lead_id
+            )
+        )
+        return int(result.scalar_one())
+
+    @staticmethod
+    def _to_domain(row: LeadObjectionORM) -> Objection:
+        return Objection(
+            id=row.id,
+            lead_id=row.lead_id,
+            organization_id=row.organization_id,
+            type=ObjectionType(row.type),
+            raw_text=row.raw_text,
+            created_at=_ensure_utc(row.created_at),
         )
 
 

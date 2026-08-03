@@ -30,9 +30,35 @@ T0 = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
 class FakeWacrmClient:
     """In-memory stand-in for the wacrm HTTP client."""
 
-    def __init__(self, snapshots: list[WacrmLeadSnapshot] | None = None):
+    def __init__(
+        self,
+        snapshots: list[WacrmLeadSnapshot] | None = None,
+        organization_id=None,
+    ):
         self.snapshots = snapshots or []
         self.stage_updates: list[tuple[str, str]] = []
+        self.organization_id = organization_id
+        self.created: list[dict] = []
+
+    async def create_lead(self, *, contact_reference, contact_name, dni=None):
+        self.created.append(
+            {
+                "contact_reference": contact_reference,
+                "contact_name": contact_name,
+                "dni": dni,
+            }
+        )
+        snapshot = WacrmLeadSnapshot(
+            crm_lead_id=f"created-{len(self.created)}",
+            organization_id=self.organization_id,
+            pipeline_stage="New",
+            assigned_broker_id=None,
+            lead_score=0.0,
+            updated_at=datetime.now(UTC),
+            contact_reference=contact_reference,
+        )
+        self.snapshots.append(snapshot)
+        return snapshot
 
     async def list_leads_updated_since(self, organization_id, since):
         return [
@@ -208,3 +234,74 @@ async def test_push_profile_update_writes_stage_to_wacrm(session_factory, seeded
 
     assert client.stage_updates == [("lead-1", "Qualified")]
     assert updated.pipeline_stage.value == "Qualified"
+
+
+async def test_create_lead_mirrors_locally_without_waiting_for_cdc(session_factory, seeded_org):
+    client = FakeWacrmClient(organization_id=seeded_org)
+    async with session_factory() as session:
+        adapter = LeadSyncAdapter(session, client=client)
+        lead = await adapter.create_lead(
+            seeded_org,
+            contact_reference="+51999888777",
+            contact_name="Ana Torres",
+            dni="45678912",
+            actor="coordinator",
+        )
+        await session.commit()
+
+    assert client.created == [
+        {"contact_reference": "+51999888777", "contact_name": "Ana Torres", "dni": "45678912"}
+    ]
+    async with session_factory() as session:
+        # Mirrored in the same call — no CDC poll happened in between.
+        row = (await session.execute(select(LeadORM))).scalar_one()
+        assert row.id == lead.id
+        assert row.crm_lead_id == "created-1"
+        assert row.contact_reference == "+51999888777"
+        assert row.pipeline_stage == "New"
+
+
+async def test_create_lead_by_unknown_actor_is_denied_before_touching_wacrm(
+    session_factory, seeded_org
+):
+    client = FakeWacrmClient(organization_id=seeded_org)
+    async with session_factory() as session:
+        adapter = LeadSyncAdapter(session, client=client)
+        with pytest.raises(CRMAccessDeniedError):
+            await adapter.create_lead(
+                seeded_org,
+                contact_reference="+51999888777",
+                contact_name="Ana Torres",
+                actor="rogue_module",
+            )
+        await session.commit()
+
+    assert client.created == []  # denied BEFORE the write reached wacrm
+    async with session_factory() as session:
+        audit = (await session.execute(select(CRMAccessAuditORM))).scalar_one()
+        assert (audit.actor, audit.action, audit.allowed) == ("rogue_module", "create", False)
+
+
+async def test_create_lead_then_poll_converges_to_one_row(session_factory, seeded_org):
+    client = FakeWacrmClient(organization_id=seeded_org)
+    async with session_factory() as session:
+        adapter = LeadSyncAdapter(session, client=client)
+        await adapter.create_lead(
+            seeded_org,
+            contact_reference="+51999888777",
+            contact_name="Ana Torres",
+            actor="coordinator",
+        )
+        await session.commit()
+
+    # The next CDC poll re-fetches the freshly created deal: the idempotent
+    # upsert must converge on the already-mirrored row, never duplicate it.
+    async with session_factory() as session:
+        adapter = LeadSyncAdapter(session, client=client)
+        await adapter.poll_once(seeded_org)
+        await session.commit()
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(LeadORM))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].crm_lead_id == "created-1"

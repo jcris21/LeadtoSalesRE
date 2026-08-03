@@ -52,6 +52,10 @@ class Property(Entity):
         property_type: PropertyType,
         features: tuple[str, ...] = (),
         description: str = "",
+        name_address: str | None = None,
+        estado: str | None = None,
+        link_references: tuple[str, ...] = (),
+        bedrooms: int | None = None,
         updated_at: datetime | None = None,
     ) -> None:
         self.id = id or new_id()
@@ -62,6 +66,16 @@ class Property(Entity):
         self.property_type = property_type
         self.features = features
         self.description = description
+        #: US-222: hard-filter dimension, nullable — inventory not yet
+        #: backfilled has no bedroom count and never matches a lead-specified
+        #: constraint (`matches_hard_filters`).
+        self.bedrooms = bedrooms
+        # US-309: fields formalized from the hand-edited Supabase schema.
+        # Deliberately NOT part of ingestion's `_content_key` — changing them
+        # must not invalidate stored embedding hashes (design.md D3).
+        self.name_address = name_address
+        self.estado = estado
+        self.link_references = link_references
         self.updated_at = updated_at or utcnow()
 
     def matches_hard_filters(
@@ -70,6 +84,7 @@ class Property(Entity):
         budget: MoneyRange | None,
         zones: tuple[str, ...],
         property_type: PropertyType | None,
+        bedrooms: int | None = None,
     ) -> bool:
         """Structured Filter Service predicate (§6.3): hard constraints only,
         never a ranking signal — a property either qualifies or is discarded."""
@@ -78,6 +93,10 @@ class Property(Entity):
         if zones and self.zone not in zones:
             return False
         if property_type is not None and self.property_type is not property_type:
+            return False
+        # US-222: absent constraint = no clause; a present constraint against
+        # an untagged (bedrooms=None) property never matches.
+        if bedrooms is not None and self.bedrooms != bedrooms:
             return False
         return True
 
@@ -138,13 +157,16 @@ class NeighborhoodInsight(ValueObject):
 @dataclass(frozen=True)
 class RecommendationItem(ValueObject):
     """One Top-3 entry returned to the Coordinator: score, explanation, and
-    neighborhood data if it arrived within the enrichment timeout."""
+    neighborhood data if it arrived within the enrichment timeout. `signals`
+    (US-310) carries the exact RankingSignals that produced the score so
+    persistence can audit the ranking rationale."""
 
     property_id: uuid.UUID
     rank: int
     score: float
     explanation: str
     neighborhood: NeighborhoodInsight | None = None
+    signals: tuple[RankingSignal, ...] = ()
 
 
 @dataclass(frozen=True)

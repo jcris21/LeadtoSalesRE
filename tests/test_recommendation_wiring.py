@@ -4,6 +4,7 @@ delivers the Top-3 via ResponseReady (the same event the Chatwoot sender
 already consumes for ordinary conversational replies)."""
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -14,7 +15,10 @@ from app.modules.conversation_ownership.infrastructure.db_models import Conversa
 from app.modules.conversation_ownership.infrastructure.repository import ConversationRepository
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
+    DecisionMakerMode,
+    FinancingType,
     Lead,
+    Motivation,
     MoneyRange,
     PropertyType,
     Timeline,
@@ -29,9 +33,17 @@ from app.modules.recommendation.application.neighborhood_enrichment import (
 )
 from app.modules.recommendation.domain.models import Property, PropertyEmbedding
 from app.modules.recommendation.infrastructure.maps_client import FakeMapsClient
-from app.modules.recommendation.infrastructure.repository import PropertyRepository
+from app.modules.recommendation.infrastructure.repository import (
+    PropertyRepository,
+    SqlPropertyLocationLookup,
+)
 from app.shared.domain.base import new_id, utcnow
 from app.shared.infrastructure.db_models import OutboxEventORM
+
+# Captured before the autouse `fake_enrichment_adapter` fixture (below) ever
+# monkeypatches `_get_enrichment_adapter` on the module, so the wiring test
+# can restore and exercise the real function.
+_REAL_GET_ENRICHMENT_ADAPTER = recommendation_wiring._get_enrichment_adapter
 
 
 @pytest.fixture
@@ -69,6 +81,10 @@ async def complete_profile(session_factory, seeded_org, seeded_lead):
         property_type=PropertyType.APARTMENT,
         timeline=Timeline.IMMEDIATE,
         must_haves=("balcony",),
+        financing_type=FinancingType.CASH,
+        decision_maker_mode=DecisionMakerMode.SOLO,
+        bedrooms=2,
+        motivation=Motivation.FIRST_HOME,
     )
     async with session_factory() as session:
         await BuyerProfileRepository(session).save(seeded_org, profile)
@@ -85,6 +101,8 @@ async def matching_property(session_factory, seeded_org):
         zone="Palermo",
         property_type=PropertyType.APARTMENT,
         features=("balcony",),
+        # US-222: matches `complete_profile`'s bedrooms=2 hard filter.
+        bedrooms=2,
     )
     async with session_factory() as session:
         repo = PropertyRepository(session)
@@ -99,8 +117,9 @@ async def matching_property(session_factory, seeded_org):
 
 @pytest.fixture(autouse=True)
 def fake_enrichment_adapter(monkeypatch):
-    """Avoid real Google Maps calls: no API key is wired yet, and the wiring
-    module's real adapter would otherwise attempt a live HTTP call."""
+    """Avoid real Google Maps calls in tests unrelated to enrichment wiring
+    itself — the real adapter would otherwise attempt a live HTTP call
+    whenever a configured API key happens to be present in the environment."""
     adapter = NeighborhoodEnrichmentAdapter(FakeMapsClient())
     monkeypatch.setattr(recommendation_wiring, "_get_enrichment_adapter", lambda: adapter)
     return adapter
@@ -226,3 +245,35 @@ async def test_handle_profile_completed_skips_when_profile_is_incomplete(
     async with session_factory() as session:
         events = (await session.execute(select(OutboxEventORM))).scalars().all()
         assert all(event.event_type != "ResponseReady" for event in events)
+
+
+def test_get_enrichment_adapter_wires_configured_api_key_and_location_lookup(monkeypatch):
+    """US-307: the process-wide singleton must pick up `google_maps_api_key`
+    from Settings and a real `SqlPropertyLocationLookup`, not build a
+    permanently-unconfigured `GoogleMapsClient` the way it did before."""
+    # The autouse `fake_enrichment_adapter` fixture replaces
+    # `_get_enrichment_adapter` itself for every test in this module; restore
+    # the real function so this test exercises the actual wiring logic.
+    monkeypatch.setattr(
+        recommendation_wiring, "_get_enrichment_adapter", _REAL_GET_ENRICHMENT_ADAPTER
+    )
+    recommendation_wiring._enrichment_adapter = None
+    fake_settings = SimpleNamespace(google_maps_api_key="test-maps-key")
+    monkeypatch.setattr(recommendation_wiring, "get_settings", lambda: fake_settings)
+
+    adapter = recommendation_wiring._get_enrichment_adapter()
+
+    try:
+        assert adapter._client._api_key == "test-maps-key"
+        assert isinstance(adapter._location_lookup, SqlPropertyLocationLookup)
+    finally:
+        recommendation_wiring._enrichment_adapter = None
+
+
+def test_closing_question_frames_a_visit_as_the_next_step():
+    """US-221: the deterministic fallback closing question (used only when the LLM
+    narrator is unavailable/keyless) must frame a visit as the natural next step, not
+    just ask which option the lead prefers, and never as a rigid yes/no."""
+    lowered = recommendation_wiring._CLOSING_QUESTION.lower()
+    assert "visita" in lowered
+    assert "sí/no" not in lowered and "si/no" not in lowered

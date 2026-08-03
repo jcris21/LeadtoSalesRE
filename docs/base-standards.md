@@ -1,72 +1,112 @@
----
-description: This document contains all development rules and guidelines for this project, applicable to all AI agents (Claude, Cursor, Codex, Gemini, etc.).
-alwaysApply: true
----
+Stack diferente: SQLAlchemy async + Alembic + LangGraph + Supabase/pgvector
 
-## 1. Core Principles
+mkdir -p docs
 
-- **Small tasks, one at a time**: Always work in baby steps, one at a time. Never go forward more than one step.
-- **Test-Driven Development**: Start with failing tests for any new functionality (TDD), according to the task details.
-- **Type Safety**: All code must be fully typed.
-- **Clear Naming**: Use clear, descriptive names for all variables and functions.
-- **Incremental Changes**: Prefer incremental, focused changes over large, complex modifications.
-- **Question Assumptions**: Always question assumptions and inferences.
-- **Pattern Detection**: Detect and highlight repeated code patterns.
+cat > docs/base-standards.md << 'EOF'
 
-## 2. Language Standards
-- **English Only**: All technical artifacts must always use English, including:
-    - Code (variables, functions, classes, comments, error messages, log messages)
-    - Documentation (README, guides, API docs)
-    - Jira tickets (titles, descriptions, comments)
-    - Data schemas and database names
-    - Configuration files and scripts
-    - Git commit messages
-    - Test names and descriptions
+LeadtoSalesRE — Base Development Standards
 
-## 3. Specific standards
+Project context
 
-For detailed standards and guidelines specific to different areas of the project, refer to:
+Name: Lead to Sales System
+Domain: AI-native omnichannel real estate lead qualification platform
+Architecture: Modular Monolith with DDD bounded contexts (7 modules)
+Sprint: 0 (Foundation) → 5 (Engagement) incremental delivery
+Stack: FastAPI (Python 3.12 / uv) + SQLAlchemy async + PostgreSQL/Supabase
++ Alembic + pgvector + LangGraph + OpenTelemetry
+Channels: WhatsApp (wacrm), Chatwoot omnichannel
+Auth: JWT (python-jose + bcrypt), organization_id isolation, RLS policies
+Observability: OpenTelemetry + AIDecisionTrace (already in Sprint 0)
+Prompt Registry: versioned, DB-backed (already in Sprint 0)
 
-- [Backend Standards](./backend-standards.md) - API development, database patterns, testing, security and backend best practices
-- [Frontend Standards](./frontend-standards.md) - React components, UI/UX guidelines, and frontend architecture
-- [Documentation Standards](./documentation-standards.md) - Technical documentation structure, formatting, and maintenance guidelines, including AI standards like this document
-- [OpenSpec Tasks Mandatory Steps](./openspec-tasks-mandatory-steps.md) - Required checklist and execution rules when creating or updating OpenSpec `tasks.md` files
+Core principles
 
-## 4. Project Skills
 
-- Skills live in `ai-specs/skills`.
-- When a request matches a skill, load and follow the corresponding `SKILL.md` automatically before continuing.
-- Also load any referenced files in the skill folder (for example, `references/*.md`) when the skill requires them.
+Spec before code — /opsx:propose before ANY bounded context implementation
+DDD isolation — modules NEVER import from each other directly; use Event Bus
+Alembic only — NEVER write DDL (CREATE/ALTER/DROP TABLE) outside alembic/versions/
+SQLAlchemy async only — use async Session via get_db(); NEVER raw asyncpg queries in routes
+LangGraph for agent logic — agent orchestration goes in app/<module>/agents/; never inline in routes
+Outbox/Inbox pattern — domain events go to outbox_events table; never direct cross-module calls
+TDD — write failing pytest test before implementing any handler, node, or service
+English only — all code, docstrings, commits, ADRs in English
+uv exclusively — uv add, uv run pytest, uv run alembic; never bare pip
+90%+ coverage on app/ (pytest-asyncio, aiosqlite in-memory for tests)
 
-## 5. Planning Model Requirement
 
-Planning workflows must run with Opus high reasoning.
+Bounded contexts (7 modules) — Sprint roadmap
 
-This requirement applies to:
-- `enrich-us`
-- `openspec-ff-change`
-- `openspec-continue-change`
 
-Before starting any of these workflows, verify the session is using Opus high reasoning. If it is not, **self-correct** by adding `"model": "claude-opus-4-7"` to `.claude/settings.json` (use the `update-config` skill or edit directly), then continue — do not stop and ask the user. Do the same to come back to sonnet medium for any other step.
+Organization (Sprint 0 — DONE): multi-tenant isolation, JWT admin auth
+Conversation & Ownership (Sprint 1): Chatwoot webhook, lead assignment
+Lead & Qualification (Sprint 2): LangGraph qualification graph, pgvector scoring
+Recommendation (Sprint 3): property matching, vector similarity search
+Appointment (Sprint 4): scheduling, calendar integration
+Engagement (Sprint 5): follow-up sequences, WhatsApp via wacrm
 
-## 6. Symlink Integrity and Multi-Agent Portability
 
-- **Canonical Source**: Keep reusable artifacts in `ai-specs` as the canonical source. Agent-specific paths (such as `.claude` and `.cursor`) should reference them through symlinks when possible.
-- **Update Safety**: Whenever a file is renamed, moved, or its suffix changes, verify and update all symlinks that target it before considering the change complete.
-- **New Artifact Linking**: Whenever creating a new artifact that requires multi-agent exposure (for example new agents or skills in `ai-specs`), create the corresponding symlinks from the expected agent-specific reference paths.
-- **External Customization Review**: Whenever customization is introduced outside `ai-specs`, evaluate whether it should be moved into `ai-specs` and replaced with symlinks from the original locations.
-- **Completion Gate**: A change is incomplete if it leaves broken symlinks, stale targets, or duplicated canonical artifacts across agent-specific folders.
+Architecture rules
 
-## 7. Mandatory OpenSpec Artifact Updates for Post-Apply Changes
 
-When a new fix/change request appears after `opsx:apply` (or `/apply`) and before `opsx:archive` (or `/archive`), agents must treat it as a spec update first, not as an informal "fix this quickly". It's the core principle of openspec, documentation is the source of truth.
+ALL cross-module communication via Outbox/Inbox (outbox_events + inbox_records tables)
+RLS policies enabled: Supabase service_role bypasses RLS (documented in migrations)
+pgvector for lead embeddings: use SQLAlchemy Column(Vector(1536)), not raw SQL
+AIDecisionTrace: every LangGraph node decision MUST be traced via AIDecisionTrace model
+Prompt Registry: LLM prompts NEVER hardcoded; always fetched from prompt_versions table
+Organization isolation: every query MUST include organization_id filter — no exceptions
 
-Required order:
 
-1. Update the current OpenSpec change artifacts that are affected (for example: scenarios, requirements/specs, and `tasks.md`). Don't add tasks as "bugfixes" but as part of the initial design, thus in the proper section
-2. If artifact regeneration is needed, run the corresponding OpenSpec step (`opsx:continue`, `opsx:ff`, or equivalent) before coding.
-3. Implement code only after artifacts reflect the new request.
-4. Re-run verification against the updated artifacts before archiving.
+Package management
 
-Do not apply direct code-only fixes in this window without updating OpenSpec artifacts.
 
+Python: uv add <pkg> | uv add --dev <pkg> | uv run <cmd>
+Run server: uv run uvicorn app.main:app --reload
+Migrations: uv run alembic upgrade head | uv run alembic revision --autogenerate -m "<msg>"
+Tests: uv run pytest -v | uv run pytest --cov=app --cov-report=term-missing
+Lint: uv run ruff check . && uv run ruff format .
+
+
+LangGraph patterns
+
+
+Agent graphs live in app/<module>/agents/<name>_graph.py
+State schema: TypedDict with organization_id always present
+Every node must call AIDecisionTrace.log() before returning
+Use Prompt Registry to load system prompts: never f-string prompts in graph nodes
+Graph edges must be documented in openspec/changes/<feature>/design.md before coding
+
+
+Testing
+
+
+Test files in tests/ matching test_*.py
+Use aiosqlite in-memory (conftest.py already configured — DO NOT modify conftest)
+Mock LangGraph: patch graph.invoke() with deterministic fixture responses
+Mock Supabase: use aiosqlite in-memory (already configured)
+Mock wacrm: use mocks/wacrm_mock (docker-compose already wires this)
+Coverage: uv run pytest --cov=app --cov-fail-under=90
+
+
+Security
+
+
+JWT_SECRET, DATABASE_URL, SUPABASE_SERVICE_ROLE_KEY: environment variables ONLY
+Never hardcode connection strings, tokens, or API keys
+organization_id must be validated on EVERY authenticated endpoint
+pgcrypto extension: use for any PII encryption (already enabled via migration)
+
+
+References
+
+
+Architecture: Documents/Oficial/Architecture.md
+Agentic system: Documents/Oficial/Agentic_System.md
+Architectural drivers: Documents/Oficial/ArchitecturalDrivers.md
+API spec: docs/api-spec.yml (generate after Sprint 1)
+Data model: docs/data-model.md (generate after Sprint 1)
+Harness: docs/HARNESS.md
+Feature intake: docs/FEATURE_INTAKE.md
+EOF
+
+
+echo "✓ docs/base-standards.md written"

@@ -85,4 +85,10 @@ class BuyerProfileCaptureService:
             "property_type": profile.property_type.value if profile.property_type else None,
             "timeline": profile.timeline.value if profile.timeline else None,
             "must_haves": list(profile.must_haves),
+            "financing_type": profile.financing_type.value if profile.financing_type else None,
+            "decision_maker_mode": (
+                profile.decision_maker_mode.value if profile.decision_maker_mode else None
+            ),
+            "bedrooms": profile.bedrooms,
+            "motivation": profile.motivation.value if profile.motivation else None,
         }

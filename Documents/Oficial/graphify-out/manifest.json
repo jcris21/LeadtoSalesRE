@@ -1,0 +1,57 @@
+{
+  "AI_Recommendation_Domain_Model.md": {
+    "mtime": 1784329511.9185343,
+    "ast_hash": "4e272863f17680f084ad88859bc88034",
+    "semantic_hash": "4e272863f17680f084ad88859bc88034"
+  },
+  "Agentic_System.md": {
+    "mtime": 1784605080.5176432,
+    "ast_hash": "e2165ba9678701c6c70fdc551a1775af",
+    "semantic_hash": "e2165ba9678701c6c70fdc551a1775af"
+  },
+  "ArchitecturalDrivers.md": {
+    "mtime": 1783181570.5323954,
+    "ast_hash": "6a3339172a1e9981b22eda85df7434f7",
+    "semantic_hash": "6a3339172a1e9981b22eda85df7434f7"
+  },
+  "Architecture.md": {
+    "mtime": 1783561187.0886955,
+    "ast_hash": "d7ac83e774e20baafd9de94d5be8b0bf",
+    "semantic_hash": "d7ac83e774e20baafd9de94d5be8b0bf"
+  },
+  "Backlog.md": {
+    "mtime": 1783903416.1706958,
+    "ast_hash": "c598d879fcdf3e2d9848c1fe2c9d72f7",
+    "semantic_hash": "c598d879fcdf3e2d9848c1fe2c9d72f7"
+  },
+  "Customer_Journey_Residencial_WhatsApp_Detallado.md": {
+    "mtime": 1783835290.2857523,
+    "ast_hash": "0d54d599c5167f9a35a0b289a2eaff80",
+    "semantic_hash": "0d54d599c5167f9a35a0b289a2eaff80"
+  },
+  "HU_Appointment_Handoff_Ownership.md": {
+    "mtime": 1784611639.0711691,
+    "ast_hash": "5f4a80525d919c1ed9ff881f8a04d4e3",
+    "semantic_hash": "5f4a80525d919c1ed9ff881f8a04d4e3"
+  },
+  "HU_Calificacion_Recomendacion.md": {
+    "mtime": 1784170963.019595,
+    "ast_hash": "849c9dc0d36381668836e22f4da91a52",
+    "semantic_hash": "849c9dc0d36381668836e22f4da91a52"
+  },
+  "ImplementationPlan.md": {
+    "mtime": 1783930344.7032282,
+    "ast_hash": "250c5734cf2df5bf7be76f8fe5c54b89",
+    "semantic_hash": "250c5734cf2df5bf7be76f8fe5c54b89"
+  },
+  "Maquina_Estados.md": {
+    "mtime": 1783835197.3322883,
+    "ast_hash": "12429c69455bb41f7eb314182896970d",
+    "semantic_hash": "12429c69455bb41f7eb314182896970d"
+  },
+  "WACRM_API_Adaptation_Plan.md": {
+    "mtime": 1783557041.3118322,
+    "ast_hash": "88917e72cc7a8d2ecfcef75e98142ddf",
+    "semantic_hash": "88917e72cc7a8d2ecfcef75e98142ddf"
+  }
+}

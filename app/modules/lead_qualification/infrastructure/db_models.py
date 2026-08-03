@@ -12,7 +12,17 @@ goes through the Lead Sync Adapter and leaves a row here — allowed or denied.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, UniqueConstraint, Uuid
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -34,6 +44,8 @@ class LeadORM(Base):
     crm_lead_id: Mapped[str] = mapped_column(String(64), nullable=False)
     pipeline_stage: Mapped[str] = mapped_column(String(32), nullable=False, default="New")
     lead_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    #: Hot/Warm/Cold, derived from lead_score by LeadScoringService (US-209).
+    lead_classification: Mapped[str] = mapped_column(String(16), nullable=False, default="hot")
     assigned_broker_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), nullable=True
     )
@@ -41,6 +53,10 @@ class LeadORM(Base):
     #: Chatwoot — the sole key a Conversation can use to resolve its Lead
     #: without either system inventing an id the other doesn't know (Sprint 3).
     contact_reference: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    #: US-211 persona snapshot (family_stage/has_pets/communication), written
+    #: solely by ProfileAggregationService — never mirrored from wacrm, so
+    #: CON-2 (wacrm as SoR) is unaffected, same precedent as lead_score.
+    buyer_persona: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
@@ -69,7 +85,49 @@ class BuyerProfileORM(Base):
     property_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     timeline: Mapped[str | None] = mapped_column(String(32), nullable=True)
     must_haves: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    #: US-208 dimensions: how the buyer plans to pay and who is involved in
+    #: the purchase decision.
+    financing_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decision_maker_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bedrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: US-219 purchase motivation (relocation/investment/vacation/first_home),
+    #: same capture pattern as `timeline`/`financing_type` — not an
+    #: isolated-writer snapshot like `ai_profile`/`readiness_score`.
+    motivation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: US-211 affinity snapshot (modern_score/family_score/confidence),
+    #: derived from conversation_memory by ProfileAggregationService — never
+    #: written by BuyerProfileCaptureService nor read by completeness().
+    ai_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    #: US-214 continuous readiness score (0-100) + financing_readiness tri-state
+    #: (ready/pre_ready/discovery), written solely by LeadReadinessService.evaluate --
+    #: same isolated-writer precedent as ai_profile, never touched by save().
+    readiness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    financing_readiness: Mapped[str | None] = mapped_column(String(16), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LeadObjectionORM(Base):
+    """Append-only sales-objection log (US-209): one row per detected
+    objection, never updated or deleted."""
+
+    __tablename__ = "lead_objections"
+    __table_args__ = (Index("ix_lead_objections_lead_id", "lead_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("leads.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    raw_text: Mapped[str] = mapped_column(String(1024), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
 
 
 class SyncCursorORM(Base):
