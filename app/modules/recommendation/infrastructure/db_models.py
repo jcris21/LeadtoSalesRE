@@ -17,7 +17,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, String, UniqueConstraint, Uuid
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -51,6 +61,9 @@ class PropertyORM(Base):
     name_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     estado: Mapped[str | None] = mapped_column(String(32), nullable=True)
     link_references: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    #: US-222: hard-filter dimension for `StructuredFilterService`. Nullable,
+    #: no backfill — see migration 0023.
+    bedrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

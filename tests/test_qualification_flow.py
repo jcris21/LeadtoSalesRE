@@ -14,8 +14,9 @@ from app.modules.lead_qualification.application.qualification_flow import (
     extract_financing_and_decision_mode,
     extract_locations,
     extract_motivation,
+    extract_must_haves,
     extract_property_type,
-    extract_timeline_and_must_haves,
+    extract_timeline,
 )
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
@@ -224,28 +225,51 @@ async def test_extract_property_type_ambiguous_message_captures_first_mention(
     assert result.property_type is PropertyType.HOUSE
 
 
-# --- timeline / must_haves (US-205) -------------------------------------
+# --- timeline / must_haves (US-205, split by US-222) --------------------
 
 
 async def test_extract_timeline_and_must_haves_both_in_one_message(
     session_factory, seeded_lead, org_id
 ):
+    """US-222: `extract_timeline` and `extract_must_haves` each fire
+    independently on a message carrying both signals — composing to the same
+    end state the old combined extractor produced."""
+    text = "Quiero comprar en 3 meses, indispensable que tenga cochera, ascensor"
     async with session_factory() as session:
-        result = await extract_timeline_and_must_haves(
+        timeline_result = await extract_timeline(
+            session, lead_id=seeded_lead, organization_id=org_id, text=text
+        )
+        must_haves_result = await extract_must_haves(
+            session, lead_id=seeded_lead, organization_id=org_id, text=text
+        )
+        await session.commit()
+    assert isinstance(timeline_result, ProfilePatch)
+    assert timeline_result.timeline is Timeline.THREE_MONTHS
+    assert timeline_result.must_haves is None
+    assert isinstance(must_haves_result, ProfilePatch)
+    assert must_haves_result.must_haves == ("cochera", "ascensor")
+    assert must_haves_result.timeline is None
+
+    async with session_factory() as session:
+        profile = await BuyerProfileRepository(session).get_by_lead_id(seeded_lead)
+    assert profile.timeline is Timeline.THREE_MONTHS
+    assert profile.must_haves == ("cochera", "ascensor")
+
+
+async def test_extract_timeline_no_signal(session_factory, seeded_lead, org_id):
+    async with session_factory() as session:
+        result = await extract_timeline(
             session,
             lead_id=seeded_lead,
             organization_id=org_id,
-            text="Quiero comprar en 3 meses, indispensable que tenga cochera, ascensor",
+            text="Hola, buenas tardes",
         )
-        await session.commit()
-    assert isinstance(result, ProfilePatch)
-    assert result.timeline is Timeline.THREE_MONTHS
-    assert result.must_haves == ("cochera", "ascensor")
+    assert result is None
 
 
-async def test_extract_timeline_and_must_haves_no_signal(session_factory, seeded_lead, org_id):
+async def test_extract_must_haves_no_signal(session_factory, seeded_lead, org_id):
     async with session_factory() as session:
-        result = await extract_timeline_and_must_haves(
+        result = await extract_must_haves(
             session,
             lead_id=seeded_lead,
             organization_id=org_id,
@@ -256,7 +280,7 @@ async def test_extract_timeline_and_must_haves_no_signal(session_factory, seeded
 
 async def test_must_haves_deduplicates_within_one_message(session_factory, seeded_lead, org_id):
     async with session_factory() as session:
-        result = await extract_timeline_and_must_haves(
+        result = await extract_must_haves(
             session,
             lead_id=seeded_lead,
             organization_id=org_id,
@@ -276,7 +300,7 @@ async def test_timeline_and_must_haves_persist_independently_across_turns(
     cross-dimension (locations vs. timeline), by covering the two fields this
     HU itself owns."""
     async with session_factory() as session:
-        first = await extract_timeline_and_must_haves(
+        first = await extract_must_haves(
             session,
             lead_id=seeded_lead,
             organization_id=org_id,
@@ -288,7 +312,7 @@ async def test_timeline_and_must_haves_persist_independently_across_turns(
     assert first.timeline is None
 
     async with session_factory() as session:
-        second = await extract_timeline_and_must_haves(
+        second = await extract_timeline(
             session,
             lead_id=seeded_lead,
             organization_id=org_id,
@@ -314,7 +338,7 @@ async def test_none_field_never_erases_previously_captured_value(
         await session.commit()
 
     async with session_factory() as session:
-        result = await extract_timeline_and_must_haves(
+        result = await extract_timeline(
             session,
             lead_id=seeded_lead,
             organization_id=org_id,
@@ -423,36 +447,37 @@ async def test_cross_tenant_extraction_is_rejected(session_factory, seeded_lead)
             )
 
 
-# --- US-217: Nivel 1 / Nivel 2 extractor ordering -----------------------
+# --- US-222 (superseding US-217): Nivel 1 / Nivel 2 extractor ordering --
 
 
-def test_deterministic_extractors_run_nivel_2_extractors_last():
-    """`_DETERMINISTIC_EXTRACTORS` (qualification_turn.py) must keep both
-    Nivel-2-only extractors (`extract_bedrooms`, and `extract_motivation`
-    added by US-219) after every Nivel 1 extractor, mirroring
-    `PROFILE_DIMENSIONS`'s Nivel 1 -> Nivel 2 precedence, with
-    `extract_motivation` last since US-219 appends `motivation` after
-    `bedrooms` in `PROFILE_DIMENSIONS`."""
+def test_deterministic_extractors_run_nivel_1_extractors_first():
+    """`_DETERMINISTIC_EXTRACTORS` (qualification_turn.py) must keep every
+    Nivel 1 (search-pipeline-relevant) extractor before every Nivel 2
+    (post-selection follow-up) extractor, mirroring `PROFILE_DIMENSIONS`'s
+    Nivel 1 -> Nivel 2 precedence. `must_haves` moved into Nivel 1 and
+    `timeline` into Nivel 2 by US-222, requiring the extractor split."""
     from app.modules.lead_qualification.application.qualification_flow import (
         extract_bedrooms,
         extract_financing_and_decision_mode,
         extract_locations,
         extract_motivation,
+        extract_must_haves,
         extract_property_type,
-        extract_timeline_and_must_haves,
+        extract_timeline,
     )
     from app.modules.lead_qualification.application.qualification_turn import (
         _DETERMINISTIC_EXTRACTORS,
     )
 
-    assert _DETERMINISTIC_EXTRACTORS[-1] is extract_motivation
     nivel_1_extractors = {
         extract_locations,
         extract_property_type,
-        extract_timeline_and_must_haves,
-        extract_financing_and_decision_mode,
+        extract_bedrooms,
+        extract_motivation,
+        extract_must_haves,
     }
-    nivel_2_extractors = {extract_bedrooms, extract_motivation}
+    nivel_2_extractors = {extract_timeline, extract_financing_and_decision_mode}
+    assert set(_DETERMINISTIC_EXTRACTORS) == nivel_1_extractors | nivel_2_extractors
     last_nivel_1_index = max(
         _DETERMINISTIC_EXTRACTORS.index(extractor) for extractor in nivel_1_extractors
     )
@@ -460,9 +485,6 @@ def test_deterministic_extractors_run_nivel_2_extractors_last():
         _DETERMINISTIC_EXTRACTORS.index(extractor) for extractor in nivel_2_extractors
     )
     assert last_nivel_1_index < first_nivel_2_index
-    assert _DETERMINISTIC_EXTRACTORS.index(extract_bedrooms) < _DETERMINISTIC_EXTRACTORS.index(
-        extract_motivation
-    )
 
 
 # --- motivation (US-219) --------------------------------------------------

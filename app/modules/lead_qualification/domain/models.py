@@ -84,25 +84,28 @@ class Motivation(StrEnum):
 #: extended by US-208 with financing_type and decision_maker_mode, by the
 #: 2026-07-19 E2E review with bedrooms, and by US-219 with motivation).
 #:
-#: US-217: ordered Nivel 1 (qualification-blocking) before Nivel 2 (refinement),
-#: so `missing_dimensions()[0]` (the directed next question, see
-#: `CompletenessGate`) always exhausts Nivel 1 first. Nivel 1 is exactly the six
-#: signals `LeadReadinessService` (US-214) weights — intención/property_type,
-#: presupuesto/budget, zona/locations, horizonte/timeline, forma de
-#: pago/financing_type, decisor/decision_maker_mode. `must_haves`, `bedrooms`,
-#: and `motivation` (US-219) are Nivel 2 refinement (asked as post-recommendation
-#: follow-up once the US-215 completeness threshold is reached), so they sort
-#: last.
+#: US-222 (superseding US-217): ordered Nivel 1 (qualification-blocking) before
+#: Nivel 2 (post-selection follow-up), so `missing_dimensions()[0]` (the
+#: directed next question, see `CompletenessGate`) always exhausts Nivel 1
+#: first. Nivel 1 is exactly the six dimensions the search pipeline itself
+#: consumes — `budget`/`locations`/`property_type`/`bedrooms` are hard filters
+#: in `StructuredFilterService.filter_candidates`, `must_haves` refines
+#: `SemanticRetrievalService`'s similarity ranking, `motivation` shapes which
+#: properties are worth surfacing at all. `timeline`, `financing_type`, and
+#: `decision_maker_mode` are Nivel 2: sales-follow-up signals `RankingEngine`
+#: never consumes, asked by the new post-selection follow-up turn
+#: (`qualification-followup-turn`) once the lead has picked a specific
+#: recommended property — not required to reach the recommendation itself.
 PROFILE_DIMENSIONS: tuple[str, ...] = (
     "budget",
     "locations",
     "property_type",
+    "bedrooms",
+    "motivation",
+    "must_haves",
     "timeline",
     "financing_type",
     "decision_maker_mode",
-    "must_haves",
-    "bedrooms",
-    "motivation",
 )
 
 #: US-219: dimensions that do not apply to certain property types, excluded

@@ -51,9 +51,11 @@ class PropertyLookup(Protocol):
         budget: MoneyRange | None,
         zones: tuple[str, ...],
         property_type: PropertyType | None,
+        bedrooms: int | None = None,
     ) -> list[Property]:
-        """US-303: hard-constraint filter as a SQL WHERE — same semantics as
-        `Property.matches_hard_filters` (absent constraint = no clause)."""
+        """US-303/US-222: hard-constraint filter as a SQL WHERE — same
+        semantics as `Property.matches_hard_filters` (absent constraint = no
+        clause)."""
         ...
 
     async def semantic_search(
@@ -130,6 +132,7 @@ class StructuredFilterService:
             budget=buyer_profile.budget,
             zones=buyer_profile.locations,
             property_type=buyer_profile.property_type,
+            bedrooms=buyer_profile.bedrooms,
         )
 
 

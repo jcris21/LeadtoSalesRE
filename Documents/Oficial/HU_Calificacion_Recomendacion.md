@@ -909,6 +909,40 @@ Scenario: Conversación nueva sin perfil previo
 - (d) [ADAPTA] Cambio de orquestación/prompt, no de dominio — `BuyerProfile.apply(patch)` ya soporta
   actualización parcial e incremental, requisito para que Nivel 2 llegue después sin bloquear.
 
+#### US-222 [SUPERSEDE a US-217] — Reclasificar Nivel 1 / Nivel 2 por rol en el motor de búsqueda
+
+Como AI Agent quiero que Nivel 1 (bloqueante) sea exactamente lo que el pipeline de búsqueda consume
+(`budget`, `locations`, `property_type`, `bedrooms`, `motivation`, `must_haves`) y que Nivel 2
+(`timeline`, `financing_type`, `decision_maker_mode`) se pregunte como seguimiento **después** de que
+el lead haya seleccionado una propiedad recomendada específica, en vez de basar el corte en las seis
+señales que pesa `LeadReadinessService` (US-214).
+
+```gherkin
+Feature: Nivel 1 = filtro de búsqueda, Nivel 2 = seguimiento post-selección
+Scenario: Recomendación con solo Nivel 1 capturado
+  Given un BuyerProfile con budget, locations, property_type, bedrooms, motivation y must_haves
+  And timeline, financing_type y decision_maker_mode aún sin capturar
+  When CompletenessGate.can_advance_to_recommendation evalúa el perfil
+  Then el gate se abre (6/9 = 66.7% ≥ 65%, US-215) sin haber preguntado Nivel 2
+
+Scenario: Seguimiento de Nivel 2 tras selección de propiedad
+  Given el lead ya seleccionó una propiedad del Top-3 (deepening_turn, US-220)
+  And timeline, financing_type o decision_maker_mode siguen sin capturar
+  When run_followup_turn evalúa el turno
+  Then se pregunta la primera dimensión Nivel 2 faltante, sin bloquear el agendamiento
+```
+
+**Alineación**
+- (a) Discovery (QUALIFICATION) para Nivel 1; Recommendation (post-selección) para Nivel 2.
+- (b) Reordena `PROFILE_DIMENSIONS`; separa el extractor combinado `extract_timeline_and_must_haves`
+  en `extract_timeline`/`extract_must_haves` (necesario porque ahora tienen distinto nivel); agrega
+  `bedrooms` como filtro duro real en `StructuredFilterService`/`PropertyRepository.filter_candidates`;
+  introduce el turno determinista nuevo `followup_turn.py`.
+- (c) `buyer_profiles` (sin cambio de columnas) + nueva columna `properties.bedrooms` (migración 0023).
+- (d) `LeadReadinessService.compute_readiness_score` (US-214) se re-pondera sobre el nuevo Nivel 1;
+  `classify_financing_readiness` queda intacto (clasificación de forma de pago independiente del gate
+  de completitud). Ver `openspec/changes/us-222-reclassify-qualification-levels/`.
+
 #### US-218 [Implementado — ver Identity Gate en coordinator.py] — Mover captura de identidad después de mostrar valor
 
 Como lead quiero que no se me pida DNI/nombre completo en el primer turno, sino después de recibir una

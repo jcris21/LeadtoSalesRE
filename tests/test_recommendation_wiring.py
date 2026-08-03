@@ -101,6 +101,8 @@ async def matching_property(session_factory, seeded_org):
         zone="Palermo",
         property_type=PropertyType.APARTMENT,
         features=("balcony",),
+        # US-222: matches `complete_profile`'s bedrooms=2 hard filter.
+        bedrooms=2,
     )
     async with session_factory() as session:
         repo = PropertyRepository(session)

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.modules.conversation_ownership.application.deepening_turn import run_deepening_turn
+from app.modules.conversation_ownership.application.followup_turn import run_followup_turn
 from app.modules.conversation_ownership.application.guardrail import GuardrailInterceptor
 from app.modules.conversation_ownership.application.intent_router import (
     IntentCategory,
@@ -415,6 +416,32 @@ class CoordinatorAgent:
             )
             return response
 
+        # US-222: the deepening turn's Top-3 disambiguation question always
+        # wins when both would have something to ask this turn (spec:
+        # "Top-3 disambiguation question takes precedence") — `deepening` is
+        # only non-None here for "selected"/"asked" outcomes (the "asked"
+        # branch above already returned), so a fresh "selected" this turn is
+        # allowed to fall through into the follow-up check immediately.
+        followup = await self._followup_turn(conversation, text, recorder)
+        if followup is not None and followup.outcome == "asked":
+            # US-222: asks for the first missing Nivel 2 dimension
+            # (timeline/financing_type/decision_maker_mode) once the lead has
+            # selected a specific recommended property — purely additive,
+            # never blocks scheduling (checked via `extract_confirmed_slot`
+            # implicitly: a lead who answers with a slot instead reaches
+            # `_scheduling_turn` on their NEXT message, same posture as the
+            # deepening turn's own non-blocking design).
+            response = followup.response or ""
+            conversation.record_event(
+                ResponseReady(
+                    organization_id=conversation.organization_id,
+                    conversation_id=str(conversation.id),
+                    chatwoot_conversation_id=conversation.chatwoot_conversation_id,
+                    response=response,
+                )
+            )
+            return response
+
         scheduling = await self._scheduling_turn(conversation, text, recorder)
         if scheduling is not None and scheduling.outcome != "no_slot":
             # `guard_reply` polices LLM output for hallucinated property
@@ -496,6 +523,21 @@ class CoordinatorAgent:
             return None
         if recorder is not None:
             recorder.record_tool_call("deepening.run_turn", {"text": text}, result.outcome)
+        return result
+
+    async def _followup_turn(self, conversation: Conversation, text: str, recorder):
+        """US-222: only meaningful in `RECOMMENDATION` — additive-only, same
+        gating posture as `_deepening_turn`. Runs AFTER `_deepening_turn`'s
+        "asked" short-circuit (that question always wins) but reachable on
+        the very turn a selection resolves, since `_deepening_turn` returns
+        non-None for `outcome == "selected"` too, without short-circuiting."""
+        if conversation.state is not ConversationState.RECOMMENDATION:
+            return None
+        result = await run_followup_turn(self._session, conversation=conversation, text=text)
+        if result.outcome == "not_applicable":
+            return None
+        if recorder is not None:
+            recorder.record_tool_call("qualification.followup_turn", {"text": text}, result.outcome)
         return result
 
     async def _scheduling_turn(self, conversation: Conversation, text: str, recorder):

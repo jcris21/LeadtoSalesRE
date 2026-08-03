@@ -413,26 +413,51 @@ def _dedupe_case_insensitive(items: Iterable[str]) -> tuple[str, ...]:
     return tuple(seen.values())
 
 
-async def extract_timeline_and_must_haves(
+async def extract_timeline(
     session: AsyncSession,
     *,
     lead_id: uuid.UUID,
     organization_id: uuid.UUID,
     text: str,
 ) -> ExtractionResult:
-    """US-205: purchase timeline and/or non-negotiable requirements, both may
-    be present in the same message and land in a single `ProfilePatch`."""
-    normalized = _normalize(text)
-    timeline = _extract_timeline(normalized)
-    must_haves = _extract_must_haves(text, normalized)
-    if timeline is None and must_haves is None:
+    """US-205/US-222: purchase timeline — split from `must_haves` (US-222) so
+    each can carry its own `PROFILE_DIMENSIONS` precedence (`timeline` is
+    Nivel 2, `must_haves` is Nivel 1)."""
+    timeline = _extract_timeline(_normalize(text))
+    if timeline is None:
         return None
 
     await _assert_tenant(session, lead_id, organization_id)
     try:
-        patch = ProfilePatch(timeline=timeline, must_haves=must_haves)
+        patch = ProfilePatch(timeline=timeline)
     except ProfileValidationError:
-        return None  # unreachable: both fields are None or non-empty here
+        return None  # unreachable: timeline is non-None here
+
+    service = BuyerProfileCaptureService(session)
+    await service.update_profile(lead_id, patch)
+    return patch
+
+
+async def extract_must_haves(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    text: str,
+) -> ExtractionResult:
+    """US-205/US-222: non-negotiable requirements — split from `timeline`
+    (US-222) so each can carry its own `PROFILE_DIMENSIONS` precedence
+    (`must_haves` is Nivel 1, `timeline` is Nivel 2)."""
+    normalized = _normalize(text)
+    must_haves = _extract_must_haves(text, normalized)
+    if must_haves is None:
+        return None
+
+    await _assert_tenant(session, lead_id, organization_id)
+    try:
+        patch = ProfilePatch(must_haves=must_haves)
+    except ProfileValidationError:
+        return None  # unreachable: must_haves is non-None here
 
     service = BuyerProfileCaptureService(session)
     await service.update_profile(lead_id, patch)

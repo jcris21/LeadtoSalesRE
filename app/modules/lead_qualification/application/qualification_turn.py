@@ -34,9 +34,10 @@ from app.modules.lead_qualification.application.qualification_flow import (
     extract_financing_and_decision_mode,
     extract_locations,
     extract_motivation,
+    extract_must_haves,
     extract_objection,
     extract_property_type,
-    extract_timeline_and_must_haves,
+    extract_timeline,
     has_budget_signal,
 )
 from app.modules.lead_qualification.domain.models import (
@@ -86,20 +87,23 @@ class QualificationTurnResult:
         return " ".join(parts)
 
 
-#: US-217: Nivel 1 (qualification-blocking) extractors before Nivel 2
-#: (refinement) extractors, mirroring `PROFILE_DIMENSIONS`'s order in
-#: `domain/models.py`. `extract_timeline_and_must_haves` stays a single call
-#: (splitting timeline from must_haves would be new domain logic, out of
-#: scope for US-217) but its Nivel 1 signal (timeline) still lands before the
-#: Nivel 2-only `extract_bedrooms`. `extract_budget` (also Nivel 1) is
-#: conditionally inserted at index 0 below when `has_budget_signal` matches.
+#: US-222 (superseding US-217): Nivel 1 (search-pipeline-relevant, qualification-
+#: blocking) extractors before Nivel 2 (post-selection follow-up) extractors,
+#: mirroring `PROFILE_DIMENSIONS`'s order in `domain/models.py`. `timeline`
+#: and `must_haves` used to share one combined extractor
+#: (`extract_timeline_and_must_haves`, US-217) but now sit in different
+#: Nivel blocks (`must_haves` Nivel 1, `timeline` Nivel 2), so US-222 splits
+#: them into `extract_must_haves`/`extract_timeline`. `extract_budget` (also
+#: Nivel 1) is conditionally inserted at index 0 below when `has_budget_signal`
+#: matches.
 _DETERMINISTIC_EXTRACTORS = (
     extract_locations,
     extract_property_type,
-    extract_timeline_and_must_haves,
-    extract_financing_and_decision_mode,
     extract_bedrooms,
     extract_motivation,
+    extract_must_haves,
+    extract_timeline,
+    extract_financing_and_decision_mode,
 )
 
 

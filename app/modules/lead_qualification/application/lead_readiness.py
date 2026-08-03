@@ -5,17 +5,24 @@ classification (US-209, `lead_scoring.py`) with an orthogonal, positive-signal
 output: a continuous weighted score in [0, 100] and a 3-state
 `FinancingReadiness` classification, both computed deterministically (no LLM)
 from `BuyerProfile`. See design.md (lead-readiness-service-us-214) for the
-weight table (Decision 1) and the READY/PRE_READY/DISCOVERY rule (Decision 2).
+original weight table and the READY/PRE_READY/DISCOVERY rule (Decision 2,
+still current).
 
-The ticket names six signals (intencion, presupuesto, zona, horizonte, forma
-de pago, decisor) that are mapped onto existing `BuyerProfile` fields:
+US-222 remapped `compute_readiness_score`'s weights onto the new Nivel 1 set
+(search-pipeline-relevant dimensions), replacing the original six-signal
+ticket mapping for the *score* only:
 
-    intencion      -> property_type
-    presupuesto    -> budget
-    zona           -> locations
-    horizonte      -> timeline (urgency-scaled)
-    forma de pago  -> financing_type (readiness-scaled)
-    decisor        -> decision_maker_mode
+    intencion      -> property_type   (15)
+    presupuesto    -> budget          (20)
+    zona           -> locations       (15)
+    (new)          -> bedrooms        (15)
+    (new)          -> motivation      (15)
+    (new)          -> must_haves      (20)
+
+`classify_financing_readiness` intentionally still reads `financing_type`/
+`timeline`/`locations` (Nivel 2 as of US-222) -- it is a financing-specific
+classification independent of the completeness-gate Nivel split, confirmed
+out of scope for US-222.
 """
 
 from __future__ import annotations
@@ -32,29 +39,20 @@ from app.modules.lead_qualification.domain.models import (
 )
 from app.modules.lead_qualification.infrastructure.repository import BuyerProfileRepository
 
-#: design.md Decision 1 weight table -- flat-captured signals. Sums with the
-#: max tier of _TIMELINE_WEIGHTS/_FINANCING_WEIGHTS to exactly 100.
+#: US-222 design.md Decision D5 weight table -- flat-captured signals over the
+#: new Nivel 1 set, sums to exactly 100.
 _INTENT_WEIGHT = 15.0
 _BUDGET_WEIGHT = 20.0
 _ZONE_WEIGHT = 15.0
-_DECISION_MAKER_WEIGHT = 10.0
+_BEDROOMS_WEIGHT = 15.0
+_MOTIVATION_WEIGHT = 15.0
+_MUST_HAVES_WEIGHT = 20.0
 
-#: design.md Decision 1: horizonte is urgency-scaled, not flat-captured.
-_TIMELINE_WEIGHTS: dict[Timeline, float] = {
-    Timeline.IMMEDIATE: 20.0,
-    Timeline.THREE_MONTHS: 15.0,
-    Timeline.SIX_MONTHS: 10.0,
-    Timeline.OVER_SIX_MONTHS: 5.0,
-    Timeline.EXPLORING: 2.0,
-}
-
-#: design.md Decision 1: forma de pago is readiness-scaled, not flat-captured.
-_FINANCING_WEIGHTS: dict[FinancingType, float] = {
-    FinancingType.CASH: 20.0,
-    FinancingType.MORTGAGE_APPROVED: 20.0,
-    FinancingType.MORTGAGE_PREAPPROVED: 15.0,
-    FinancingType.EVALUATING: 8.0,
-}
+#: US-222: `timeline`/`financing_type` no longer feed `compute_readiness_score`
+#: (Nivel 2 as of US-222) -- the old `_TIMELINE_WEIGHTS`/`_FINANCING_WEIGHTS`
+#: tier tables were removed since nothing else read them. They still gate
+#: `classify_financing_readiness` below via the separate `_READY_FINANCING`/
+#: `_READY_TIMELINE` frozensets, which are unaffected by this change.
 
 #: design.md Decision 2: financing_type values strong enough for READY.
 _READY_FINANCING = frozenset({FinancingType.CASH, FinancingType.MORTGAGE_APPROVED})
@@ -72,8 +70,8 @@ class LeadReadinessResult:
 
 
 def compute_readiness_score(profile: BuyerProfile) -> float:
-    """design.md Decision 1: additive weighted sum across the six named
-    readiness signals, clamped to [0, 100]."""
+    """US-222 design.md Decision D5: additive weighted sum across the six
+    Nivel 1 (search-pipeline-relevant) signals, clamped to [0, 100]."""
     score = 0.0
     if profile.property_type is not None:
         score += _INTENT_WEIGHT
@@ -81,12 +79,12 @@ def compute_readiness_score(profile: BuyerProfile) -> float:
         score += _BUDGET_WEIGHT
     if profile.locations:
         score += _ZONE_WEIGHT
-    if profile.timeline is not None:
-        score += _TIMELINE_WEIGHTS[profile.timeline]
-    if profile.financing_type is not None:
-        score += _FINANCING_WEIGHTS[profile.financing_type]
-    if profile.decision_maker_mode is not None:
-        score += _DECISION_MAKER_WEIGHT
+    if profile.bedrooms is not None:
+        score += _BEDROOMS_WEIGHT
+    if profile.motivation is not None:
+        score += _MOTIVATION_WEIGHT
+    if profile.must_haves:
+        score += _MUST_HAVES_WEIGHT
     return max(0.0, min(100.0, score))
 
 

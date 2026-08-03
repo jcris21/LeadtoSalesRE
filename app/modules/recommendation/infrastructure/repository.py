@@ -50,6 +50,7 @@ class PropertyRepository:
         row.name_address = property.name_address
         row.estado = property.estado
         row.link_references = list(property.link_references)
+        row.bedrooms = property.bedrooms
         row.updated_at = property.updated_at
 
     async def get_embedding(self, property_id: uuid.UUID) -> PropertyEmbedding | None:
@@ -111,10 +112,11 @@ class PropertyRepository:
         budget: MoneyRange | None,
         zones: tuple[str, ...],
         property_type: PropertyType | None,
+        bedrooms: int | None = None,
     ) -> list[Property]:
-        """US-303: hard-constraint filter pushed down to SQL WHERE — same
-        semantics as `Property.matches_hard_filters` (an absent constraint
-        adds no clause), always scoped by organization."""
+        """US-303/US-222: hard-constraint filter pushed down to SQL WHERE —
+        same semantics as `Property.matches_hard_filters` (an absent
+        constraint adds no clause), always scoped by organization."""
         query = select(PropertyORM).where(PropertyORM.organization_id == organization_id)
         if budget is not None:
             query = query.where(
@@ -124,6 +126,8 @@ class PropertyRepository:
             query = query.where(PropertyORM.zone.in_(zones))
         if property_type is not None:
             query = query.where(PropertyORM.property_type == property_type.value)
+        if bedrooms is not None:
+            query = query.where(PropertyORM.bedrooms == bedrooms)
         result = await self._session.execute(query)
         return [self._to_domain(row) for row in result.scalars().all()]
 
@@ -214,6 +218,7 @@ class PropertyRepository:
             name_address=property.name_address,
             estado=property.estado,
             link_references=list(property.link_references),
+            bedrooms=property.bedrooms,
             updated_at=property.updated_at,
         )
 
@@ -231,6 +236,7 @@ class PropertyRepository:
             name_address=row.name_address,
             estado=row.estado,
             link_references=tuple(row.link_references or ()),
+            bedrooms=row.bedrooms,
             updated_at=_ensure_utc(row.updated_at),
         )
 

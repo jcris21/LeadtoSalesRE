@@ -118,9 +118,12 @@ async def test_profile_completed_fires_exactly_on_crossing_threshold(
 
 
 def test_gate_default_threshold_allows_advance_with_all_nivel_1_dimensions():
-    """US-215 recalibration: with the platform-default threshold, the gate
-    opens once all six Nivel 1 dimensions are captured, even with zero
-    Nivel 2 (must_haves/bedrooms/motivation) dimensions."""
+    """US-215 recalibration (dimensions updated for US-222): with the
+    platform-default threshold, the gate opens once all six of ANY 6/9
+    dimensions are captured (`completeness()` is dimension-agnostic) — this
+    scenario captures the old Nivel 1 set plus decision_maker_mode, still
+    6/9, to prove the threshold math itself is unaffected by which
+    dimensions they are."""
     profile = BuyerProfile(
         lead_id=new_id(),
         budget=MoneyRange(50, 80),
@@ -144,14 +147,14 @@ def test_gate_default_threshold_blocks_with_one_nivel_1_dimension_missing():
         budget=MoneyRange(50, 80),
         locations=("Surco",),
         property_type=PropertyType.HOUSE,
-        timeline=Timeline.IMMEDIATE,
-        financing_type=FinancingType.CASH,
-        # decision_maker_mode intentionally left uncaptured.
+        bedrooms=3,
+        motivation=Motivation.FIRST_HOME,
+        # must_haves intentionally left uncaptured.
     )
     result = CompletenessGate().can_advance_to_recommendation(profile)
     assert result.can_advance is False
     assert result.completeness == pytest.approx(500.0 / 9)
-    assert result.missing_dimension == "decision_maker_mode"
+    assert result.missing_dimension == "must_haves"
 
 
 def test_gate_blocks_incomplete_profile_with_directed_missing_dimension():
@@ -202,20 +205,20 @@ def test_gate_opens_at_default_threshold_once_nivel_1_captured():
 
 
 def test_gate_stays_closed_at_default_threshold_missing_one_nivel_1_dimension():
-    """Five of six Nivel 1 dimensions (missing `decision_maker_mode`) must NOT
+    """Five of six Nivel 1 dimensions (missing `must_haves`) must NOT
     reach the recalibrated default threshold."""
     profile = BuyerProfile(
         lead_id=new_id(),
         budget=MoneyRange(50, 80),
         locations=("Surco",),
         property_type=PropertyType.HOUSE,
-        timeline=Timeline.THREE_MONTHS,
-        financing_type=FinancingType.CASH,
+        bedrooms=3,
+        motivation=Motivation.FIRST_HOME,
     )
     assert profile.completeness() == pytest.approx(500.0 / 9.0)
     result = CompletenessGate().can_advance_to_recommendation(profile)
     assert result.can_advance is False
-    assert result.missing_dimension == "decision_maker_mode"
+    assert result.missing_dimension == "must_haves"
 
 
 # --- US-208: financing_type / decision_maker_mode dimensions -----------
@@ -224,50 +227,69 @@ def test_gate_stays_closed_at_default_threshold_missing_one_nivel_1_dimension():
 def test_profile_dimensions_now_has_nine_elements():
     from app.modules.lead_qualification.domain.models import PROFILE_DIMENSIONS
 
-    # US-217: Nivel 1 (qualification-blocking) dimensions precede Nivel 2
-    # (refinement) dimensions -- must_haves/bedrooms sort last.
+    # US-222 (superseding US-217): Nivel 1 (search-pipeline-relevant)
+    # dimensions precede Nivel 2 (post-selection follow-up) dimensions --
+    # timeline/financing_type/decision_maker_mode sort last.
     assert PROFILE_DIMENSIONS == (
         "budget",
         "locations",
         "property_type",
+        "bedrooms",
+        "motivation",
+        "must_haves",
         "timeline",
         "financing_type",
         "decision_maker_mode",
-        "must_haves",
-        "bedrooms",
-        "motivation",
     )
 
 
-# --- US-217: Nivel 1 / Nivel 2 precedence -------------------------------
+# --- US-222 (superseding US-217): Nivel 1 / Nivel 2 precedence ---------
 
 
 def test_gate_prefers_nivel_1_missing_dimension_over_nivel_2():
-    """When both a Nivel 1 (financing_type) and a Nivel 2 (must_haves)
+    """When both a Nivel 1 (must_haves) and a Nivel 2 (financing_type)
     dimension are missing, the directed question must target Nivel 1 first."""
     profile = BuyerProfile(
         lead_id=new_id(),
         budget=MoneyRange(50, 80),
         locations=("Surco",),
         property_type=PropertyType.HOUSE,
+        bedrooms=3,
+        motivation=Motivation.FIRST_HOME,
         timeline=Timeline.IMMEDIATE,
         decision_maker_mode=DecisionMakerMode.SOLO,
-        bedrooms=3,
         # must_haves and financing_type intentionally left uncaptured.
     )
     result = CompletenessGate(threshold=90.0).can_advance_to_recommendation(profile)
     assert result.can_advance is False
-    assert result.missing_dimension == "financing_type"
+    assert result.missing_dimension == "must_haves"
 
 
 def test_missing_dimensions_lists_nivel_1_before_nivel_2():
     profile = BuyerProfile(lead_id=new_id())
     missing = profile.missing_dimensions()
-    nivel_1 = ("budget", "locations", "property_type", "timeline", "financing_type", "decision_maker_mode")
-    nivel_2 = ("must_haves", "bedrooms")
+    nivel_1 = ("budget", "locations", "property_type", "bedrooms", "motivation", "must_haves")
+    nivel_2 = ("timeline", "financing_type", "decision_maker_mode")
     last_nivel_1_index = max(missing.index(dim) for dim in nivel_1)
     first_nivel_2_index = min(missing.index(dim) for dim in nivel_2)
     assert last_nivel_1_index < first_nivel_2_index
+
+
+def test_recommendation_unlocks_on_nivel_1_completion_alone():
+    """US-222: the six Nivel 1 dimensions alone (6/9 = 66.7%) cross the 65%
+    threshold (US-215) without any Nivel 2 dimension captured."""
+    profile = BuyerProfile(
+        lead_id=new_id(),
+        budget=MoneyRange(50, 80),
+        locations=("Surco",),
+        property_type=PropertyType.HOUSE,
+        bedrooms=3,
+        motivation=Motivation.FIRST_HOME,
+        must_haves=("jardín",),
+        # timeline, financing_type, decision_maker_mode intentionally uncaptured.
+    )
+    result = CompletenessGate().can_advance_to_recommendation(profile)
+    assert result.can_advance is True
 
 
 def test_original_five_dimensions_no_longer_report_full_completeness():

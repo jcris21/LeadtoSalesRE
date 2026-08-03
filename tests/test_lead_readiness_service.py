@@ -11,10 +11,10 @@ from app.modules.lead_qualification.application.lead_readiness import (
 )
 from app.modules.lead_qualification.domain.models import (
     BuyerProfile,
-    DecisionMakerMode,
     FinancingReadiness,
     FinancingType,
     Lead,
+    Motivation,
     MoneyRange,
     PropertyType,
     Timeline,
@@ -49,18 +49,20 @@ def _empty_profile(lead_id):
 
 
 def _full_profile(lead_id):
+    """US-222: all six new Nivel 1 (search-pipeline-relevant) dimensions
+    captured -- `compute_readiness_score`'s max-score scenario post-reweight."""
     return BuyerProfile(
         lead_id=lead_id,
         budget=MoneyRange(minimum=100_000, maximum=200_000),
         locations=("Miraflores",),
         property_type=PropertyType.APARTMENT,
-        timeline=Timeline.IMMEDIATE,
-        financing_type=FinancingType.CASH,
-        decision_maker_mode=DecisionMakerMode.SOLO,
+        bedrooms=2,
+        motivation=Motivation.FIRST_HOME,
+        must_haves=("cochera",),
     )
 
 
-# --- compute_readiness_score ----------------------------------------------
+# --- compute_readiness_score (US-222 reweight) -----------------------------
 
 
 def test_empty_profile_scores_zero():
@@ -68,34 +70,33 @@ def test_empty_profile_scores_zero():
     assert compute_readiness_score(profile) == 0.0
 
 
-def test_fully_captured_profile_at_max_tiers_scores_100():
+def test_fully_captured_profile_scores_100():
     profile = _full_profile(new_id())
     assert compute_readiness_score(profile) == 100.0
 
 
-def test_partial_profile_with_urgency_signals_scores_between_bounds():
-    # Ticket example scenario: financing_type + timeline + locations captured,
-    # not all 8 dimensions.
+def test_partial_profile_with_search_signals_scores_between_bounds():
     profile = BuyerProfile(
         lead_id=new_id(),
         locations=("San Isidro",),
-        timeline=Timeline.THREE_MONTHS,
-        financing_type=FinancingType.MORTGAGE_PREAPPROVED,
+        bedrooms=2,
+        must_haves=("cochera",),
     )
     score = compute_readiness_score(profile)
-    # locations(15) + timeline 3_months(15) + financing preapproved(15) = 45
-    assert score == 45.0
+    # locations(15) + bedrooms(15) + must_haves(20) = 50
+    assert score == 50.0
     assert 0.0 < score < 100.0
 
 
-def test_exploring_timeline_and_evaluating_financing_score_low_tiers():
+def test_nivel_2_dimensions_do_not_affect_score():
+    """US-222: timeline/financing_type/decision_maker_mode are Nivel 2 and no
+    longer contribute to compute_readiness_score."""
     profile = BuyerProfile(
         lead_id=new_id(),
-        timeline=Timeline.EXPLORING,
-        financing_type=FinancingType.EVALUATING,
+        timeline=Timeline.IMMEDIATE,
+        financing_type=FinancingType.CASH,
     )
-    # timeline exploring(2) + financing evaluating(8) = 10
-    assert compute_readiness_score(profile) == 10.0
+    assert compute_readiness_score(profile) == 0.0
 
 
 def test_score_is_clamped_to_100_upper_bound():
@@ -164,6 +165,7 @@ async def test_evaluate_persists_readiness_score_and_financing_readiness(
             locations=("Miraflores",),
             timeline=Timeline.IMMEDIATE,
             financing_type=FinancingType.CASH,
+            bedrooms=2,
         )
         await BuyerProfileRepository(session).save(org_id, profile)
         await session.commit()
@@ -173,9 +175,12 @@ async def test_evaluate_persists_readiness_score_and_financing_readiness(
         result = await LeadReadinessService(session).evaluate(profile)
         await session.commit()
 
+    # classify_financing_readiness (US-222: unchanged) still reads
+    # financing_type/timeline/locations regardless of their Nivel.
     assert result.financing_readiness is FinancingReadiness.READY
-    # locations(15) + timeline immediate(20) + financing cash(20) = 55
-    assert result.readiness_score == 55.0
+    # US-222 reweight: locations(15) + bedrooms(15) = 30 (timeline/financing_type
+    # no longer contribute to the score).
+    assert result.readiness_score == 30.0
 
     async with session_factory() as session:
         from sqlalchemy import select
